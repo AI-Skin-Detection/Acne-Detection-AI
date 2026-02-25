@@ -1,0 +1,73 @@
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# -------------------------
+# Virtual Environment
+# -------------------------
+venv/
+env/
+ENV/
+.venv/
+
+# -------------------------
+# Streamlit
+# -------------------------
+.streamlit/secrets.toml
+
+# -------------------------
+# Model Files (Large Files)
+# -------------------------
+*.pt
+*.onnx
+*.h5
+
+# -------------------------
+# Test Images / Datasets
+# -------------------------
+
+data/
+datasets/
+
+# -------------------------
+# Logs
+# -------------------------
+*.log
+logs/
+
+# -------------------------
+# VS Code
+# -------------------------
+.vscode/
+*.code-workspace
+
+# -------------------------
+# OS Files
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# Environment Variables
+# -------------------------
+.env
+.env.*
