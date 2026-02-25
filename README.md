@@ -45,23 +45,6 @@ The application provides a user-friendly web interface where users can upload im
    - Make sure `acne_model_best.pth` is in the project directory
    - This file contains the trained ResNet50 model weights
 
-## 💻 Usage
-
-1. **Run the Streamlit application**
-   ```bash
-   streamlit run app.py
-   ```
-
-2. **Open your browser**
-   - The app will automatically open at `http://localhost:8501`
-   - If not, manually navigate to the URL shown in the terminal
-
-3. **Use the application**
-   - Click "Browse files" to upload an acne image
-   - View the uploaded image preview
-   - Click "Predict Acne Type" button
-   - View the prediction results and confidence score
-
 ## 🏗️ Project Structure
 
 ```
