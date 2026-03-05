@@ -1,5 +1,6 @@
-streamlit==1.31.0
 torch --pre
 torchvision --pre
-torchaudio --pre
 Pillow==10.2.0
+fastapi
+uvicorn[standard]
+python-multipart
