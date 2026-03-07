@@ -9,6 +9,8 @@ export default function AcneDetector() {
   const [result, setResult] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
+  const predictionLabel = result?.prediction ?? result?.predicted_class;
+
   const handleUpload = (e: any) => {
     const file = e.target.files[0];
 
@@ -147,8 +149,21 @@ className="mt-6 w-full bg-green-500 hover:bg-green-600 text-black font-semibold 
 
 <div className="text-center">
 
+{result.heatmap ? (
+<div className="mb-6">
+  <p className="text-gray-300 mb-3">
+    Acne Heatmap (Grad-CAM)
+  </p>
+  <img
+    src={result.heatmap}
+    className="w-full rounded"
+    alt="Grad-CAM heatmap overlay"
+  />
+</div>
+) : null}
+
 <h2 className="text-3xl text-green-400 font-bold mb-3">
-{result.prediction}
+{predictionLabel}
 </h2>
 
 <p className="text-gray-300">
