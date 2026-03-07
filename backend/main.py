@@ -1,5 +1,6 @@
 import os
 import io
+import base64
 import bcrypt
 import sqlite3
 import torch
@@ -8,6 +9,7 @@ from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from torchvision import models, transforms
+from torchvision.transforms.functional import to_pil_image
 
 app = FastAPI()
 
@@ -60,6 +62,92 @@ MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.eval()
+
+
+def _find_last_conv_layer(m: torch.nn.Module) -> torch.nn.Module:
+    last_conv = None
+    for layer in m.modules():
+        if isinstance(layer, torch.nn.Conv2d):
+            last_conv = layer
+    if last_conv is None:
+        raise RuntimeError("No Conv2d layer found for Grad-CAM")
+    return last_conv
+
+
+def _jet_colormap(x: torch.Tensor) -> torch.Tensor:
+    """Map a [H,W] tensor in [0,1] to an RGB [3,H,W] tensor in [0,1]."""
+    x = x.clamp(0, 1)
+    r = (1.5 - (4 * x - 3).abs()).clamp(0, 1)
+    g = (1.5 - (4 * x - 2).abs()).clamp(0, 1)
+    b = (1.5 - (4 * x - 1).abs()).clamp(0, 1)
+    return torch.stack([r, g, b], dim=0)
+
+
+def _gradcam_overlay_png_data_url(
+    *,
+    model: torch.nn.Module,
+    input_tensor: torch.Tensor,
+    input_image_224: Image.Image,
+    class_index: int,
+    alpha: float = 0.45,
+) -> str:
+    """Return a Grad-CAM overlay PNG as a data URL for the provided class_index."""
+    target_layer = _find_last_conv_layer(model)
+
+    activations: torch.Tensor | None = None
+    gradients: torch.Tensor | None = None
+
+    def _forward_hook(_module, _inputs, output):
+        nonlocal activations
+        activations = output
+
+    def _backward_hook(_module, _grad_input, grad_output):
+        nonlocal gradients
+        gradients = grad_output[0]
+
+    h1 = target_layer.register_forward_hook(_forward_hook)
+    try:
+        h2 = target_layer.register_full_backward_hook(_backward_hook)
+    except AttributeError:
+        h2 = target_layer.register_backward_hook(_backward_hook)
+
+    try:
+        model.zero_grad(set_to_none=True)
+        logits = model(input_tensor)
+        score = logits[0, class_index]
+        score.backward(retain_graph=False)
+
+        if activations is None or gradients is None:
+            raise RuntimeError("Failed to capture activations/gradients for Grad-CAM")
+
+        acts = activations[0]  # [C,h,w]
+        grads = gradients[0]   # [C,h,w]
+        weights = grads.mean(dim=(1, 2))
+        cam = (weights[:, None, None] * acts).sum(dim=0)
+        cam = torch.relu(cam)
+        cam = cam - cam.min()
+        cam = cam / (cam.max() + 1e-8)
+
+        cam = torch.nn.functional.interpolate(
+            cam[None, None, ...],
+            size=(224, 224),
+            mode="bilinear",
+            align_corners=False,
+        )[0, 0]
+
+        heatmap_rgb = _jet_colormap(cam)
+        img_tensor = transforms.ToTensor()(input_image_224)  # [3,224,224] in [0,1]
+
+        overlay = ((1 - alpha) * img_tensor + alpha * heatmap_rgb).clamp(0, 1)
+        overlay_pil = to_pil_image(overlay)
+
+        buf = io.BytesIO()
+        overlay_pil.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+    finally:
+        h1.remove()
+        h2.remove()
 
 # ---------------- SIGNUP ----------------
 
@@ -134,8 +222,10 @@ async def predict(
         transforms.ToTensor()
     ])
 
+    image_224 = image.resize((224, 224))
     img_tensor = transform(image).unsqueeze(0)
 
+    # Prediction (no gradients needed)
     with torch.no_grad():
         outputs = model(img_tensor)
         probs = torch.nn.functional.softmax(outputs, dim=1)
@@ -143,6 +233,19 @@ async def predict(
 
     prediction = CLASS_NAMES[idx.item()]
     confidence_score = float(confidence.item() * 100)
+
+    # Grad-CAM heatmap overlay for the predicted class
+    heatmap = None
+    try:
+        img_tensor_cam = img_tensor.clone().detach().requires_grad_(True)
+        heatmap = _gradcam_overlay_png_data_url(
+            model=model,
+            input_tensor=img_tensor_cam,
+            input_image_224=image_224,
+            class_index=int(idx.item()),
+        )
+    except Exception:
+        heatmap = None
 
     conn = sqlite3.connect("dermai.db")
     c = conn.cursor()
@@ -157,7 +260,8 @@ async def predict(
 
     return {
         "prediction": prediction,
-        "confidence": confidence_score
+        "confidence": confidence_score,
+        "heatmap": heatmap,
     }
 
 # ---------------- HISTORY ----------------

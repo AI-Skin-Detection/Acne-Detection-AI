@@ -27,7 +27,8 @@ venv/
 env/
 ENV/
 .venv/
-
+.streamlit/venv/
+.streamlit/
 # -------------------------
 # Streamlit
 # -------------------------
