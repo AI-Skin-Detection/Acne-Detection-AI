@@ -1,0 +1,7 @@
+torch --pre
+torchvision --pre
+Pillow>=11.0.0
+fastapi
+uvicorn[standard]
+python-multipart
+bcrypt
