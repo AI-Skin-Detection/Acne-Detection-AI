@@ -9,6 +9,7 @@ import torch.nn as nn
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from ultralytics import YOLO
 from torchvision import models, transforms
 from torchvision.transforms.functional import to_pil_image
 from fastapi.responses import FileResponse
@@ -79,9 +80,12 @@ model.fc = nn.Linear(model.fc.in_features, 5)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
+YOLO_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best.pt")
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.eval()
+
+yolo_model = YOLO(YOLO_MODEL_PATH)
 
 
 def _find_last_conv_layer(m: torch.nn.Module) -> torch.nn.Module:
@@ -168,6 +172,32 @@ def _gradcam_overlay_png_data_url(
     finally:
         h1.remove()
         h2.remove()
+
+
+def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
+    detections: list[dict[str, object]] = []
+
+    results = yolo_model.predict(source=image, verbose=False)
+    if not results:
+        return detections
+
+    result = results[0]
+    names = result.names or {}
+
+    for box in result.boxes:
+        class_id = int(box.cls.item()) if box.cls is not None else -1
+        confidence = float(box.conf.item() * 100) if box.conf is not None else 0.0
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+
+        detections.append(
+            {
+                "class": names.get(class_id, str(class_id)),
+                "confidence": confidence,
+                "bbox": [x1, y1, x2, y2],
+            }
+        )
+
+    return detections
 
 # ---------------- SIGNUP ----------------
 
@@ -267,6 +297,11 @@ async def predict(
     except Exception:
         heatmap = None
 
+    try:
+        detections = _yolo_detections(image)
+    except Exception:
+        detections = []
+
     conn = sqlite3.connect("dermai.db")
     c = conn.cursor()
 
@@ -288,6 +323,7 @@ async def predict(
         "prediction": prediction,
         "confidence": confidence_score,
         "heatmap": heatmap,
+        "detections": detections,
     }
 
 # ---------------- HISTORY ----------------
