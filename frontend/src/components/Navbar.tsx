@@ -80,24 +80,6 @@ const Navbar: React.FC = () => {
             About
           </button>
 
-          {!loggedIn && (
-            <>
-              <button
-                onClick={() => window.location.href = "/login"}
-                className="text-gray-300 hover:text-green-400"
-              >
-                Login
-              </button>
-
-              <button
-                onClick={() => window.location.href = "/signup"}
-                className="text-gray-300 hover:text-green-400"
-              >
-                Signup
-              </button>
-            </>
-          )}
-
           {loggedIn && (
             <>
               <span className="text-green-400 text-sm">
@@ -168,24 +150,6 @@ const Navbar: React.FC = () => {
             >
               About
             </button>
-
-            {!loggedIn && (
-              <>
-                <button
-                  onClick={() => window.location.href = "/login"}
-                  className="block w-full text-left text-gray-300"
-                >
-                  Login
-                </button>
-
-                <button
-                  onClick={() => window.location.href = "/signup"}
-                  className="block w-full text-left text-gray-300"
-                >
-                  Signup
-                </button>
-              </>
-            )}
 
             {loggedIn && (
               <>

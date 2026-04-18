@@ -12,6 +12,7 @@ type ApiResult = {
   prediction?: string;
   predicted_class?: string;
   confidence?: number;
+  confidences?: Record<string, number>;
   heatmap?: string;
   detections?: Detection[];
   error?: string;
@@ -161,14 +162,7 @@ export default function AcneDetector() {
       return;
     }
 
-    const storedId = localStorage.getItem("user_id");
-
-    if (!storedId) {
-      alert("Please login first");
-      return;
-    }
-
-    const user_id = Number(storedId);
+    const user_id = Number(localStorage.getItem("user_id") ?? 0);
 
     const formData = new FormData();
     formData.append("file", selectedFile);
@@ -362,17 +356,37 @@ export default function AcneDetector() {
               </p>
 
               <button
-                onClick={() => {
-                  if (!predictionLabel || !result?.confidence) {
+                onClick={async () => {
+                  if (!predictionLabel || result?.confidence == null) {
                     alert("Run analysis first");
                     return;
                   }
 
-                  const url = `${API}/generate-pdf?prediction=${encodeURIComponent(
-                    predictionLabel
-                  )}&confidence=${result.confidence}`;
+                  const res = await fetch(`${API}/generate-pdf`, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
+                      prediction: predictionLabel,
+                      confidence: result.confidence,
+                      original_image: preview,
+                      heatmap: result.heatmap ?? null,
+                      confidences: result.confidences ?? null,
+                    }),
+                  });
 
-                  window.open(url, "_blank");
+                  if (!res.ok) {
+                    alert("Failed to generate PDF report");
+                    return;
+                  }
+
+                  const blob = await res.blob();
+                  const a = document.createElement("a");
+                  a.href = URL.createObjectURL(blob);
+                  a.download = "report.pdf";
+                  a.click();
+                  URL.revokeObjectURL(a.href);
                 }}
                 className="mt-4 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
               >
