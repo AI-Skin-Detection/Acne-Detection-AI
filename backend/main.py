@@ -178,25 +178,49 @@ def _gradcam_overlay_png_data_url(
 def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
     detections: list[dict[str, object]] = []
 
-    results = yolo_model.predict(source=image, verbose=False)
-    if not results:
-        return detections
+    try:
+        print(f"Running YOLO inference on image size: {image.size}")
+        # Use very low confidence threshold to catch even weak detections
+        results = yolo_model.predict(source=image, verbose=False, conf=0.01, iou=0.5)
 
-    result = results[0]
-    names = result.names or {}
+        if not results:
+            print("No results returned from YOLO")
+            return detections
 
-    for box in result.boxes:
-        class_id = int(box.cls.item()) if box.cls is not None else -1
-        confidence = float(box.conf.item() * 100) if box.conf is not None else 0.0
-        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        result = results[0]
+        names = result.names or {}
+        img_width, img_height = image.size
 
-        detections.append(
-            {
+        print(f"Number of boxes detected: {len(result.boxes)}")
+
+        for box in result.boxes:
+            class_id = int(box.cls.item()) if box.cls is not None else -1
+            confidence = float(box.conf.item() * 100) if box.conf is not None else 0.0
+            x1, y1, x2, y2 = box.xyxy[0].tolist()
+
+            # Calculate box dimensions
+            box_width = x2 - x1
+            box_height = y2 - y1
+            box_area_ratio = (box_width * box_height) / (img_width * img_height)
+
+            # Filter out boxes that cover more than 70% of the image (too general)
+            if box_area_ratio > 0.7:
+                print(f"Skipping large box covering {box_area_ratio*100:.1f}% of image")
+                continue
+
+            detection = {
                 "class": names.get(class_id, str(class_id)),
                 "confidence": confidence,
                 "bbox": [x1, y1, x2, y2],
             }
-        )
+            print(f"Detection: {detection}")
+            detections.append(detection)
+
+        print(f"Total specific detections: {len(detections)}")
+    except Exception as e:
+        import traceback
+        print(f"YOLO Error: {e}")
+        traceback.print_exc()
 
     return detections
 
@@ -300,7 +324,8 @@ async def predict(
 
     try:
         detections = _yolo_detections(image)
-    except Exception:
+    except Exception as e:
+        print(f"Error getting YOLO detections: {e}")
         detections = []
 
     conn = sqlite3.connect("dermai.db")
