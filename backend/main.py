@@ -3,7 +3,10 @@ import io
 import base64
 import bcrypt
 import sqlite3
+from collections import Counter
 from datetime import datetime
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -48,24 +51,9 @@ def init_db():
             user_id INTEGER,
             image_name TEXT,
             prediction TEXT,
-            created_at TEXT,
-            heatmap TEXT
+            created_at TEXT
         )
     """)
-
-    # Backward-compatible migration for existing databases:
-    # try to add created_at and heatmap columns if they don't exist yet.
-    try:
-        c.execute("ALTER TABLE history ADD COLUMN created_at TEXT")
-    except sqlite3.OperationalError:
-        # Column already exists
-        pass
-
-    try:
-        c.execute("ALTER TABLE history ADD COLUMN heatmap TEXT")
-    except sqlite3.OperationalError:
-        # Column already exists
-        pass
 
     conn.commit()
     conn.close()
@@ -89,99 +77,12 @@ model.eval()
 yolo_model = YOLO(YOLO_MODEL_PATH)
 
 
-def _find_last_conv_layer(m: torch.nn.Module) -> torch.nn.Module:
-    last_conv = None
-    for layer in m.modules():
-        if isinstance(layer, torch.nn.Conv2d):
-            last_conv = layer
-    if last_conv is None:
-        raise RuntimeError("No Conv2d layer found for Grad-CAM")
-    return last_conv
-
-
-def _jet_colormap(x: torch.Tensor) -> torch.Tensor:
-    """Map a [H,W] tensor in [0,1] to an RGB [3,H,W] tensor in [0,1]."""
-    x = x.clamp(0, 1)
-    r = (1.5 - (4 * x - 3).abs()).clamp(0, 1)
-    g = (1.5 - (4 * x - 2).abs()).clamp(0, 1)
-    b = (1.5 - (4 * x - 1).abs()).clamp(0, 1)
-    return torch.stack([r, g, b], dim=0)
-
-
-def _gradcam_overlay_png_data_url(
-    *,
-    model: torch.nn.Module,
-    input_tensor: torch.Tensor,
-    input_image_224: Image.Image,
-    class_index: int,
-    alpha: float = 0.45,
-) -> str:
-    """Return a Grad-CAM overlay PNG as a data URL for the provided class_index."""
-    target_layer = _find_last_conv_layer(model)
-
-    activations: torch.Tensor | None = None
-    gradients: torch.Tensor | None = None
-
-    def _forward_hook(_module, _inputs, output):
-        nonlocal activations
-        activations = output
-
-    def _backward_hook(_module, _grad_input, grad_output):
-        nonlocal gradients
-        gradients = grad_output[0]
-
-    h1 = target_layer.register_forward_hook(_forward_hook)
-    try:
-        h2 = target_layer.register_full_backward_hook(_backward_hook)
-    except AttributeError:
-        h2 = target_layer.register_backward_hook(_backward_hook)
-
-    try:
-        model.zero_grad(set_to_none=True)
-        logits = model(input_tensor)
-        score = logits[0, class_index]
-        score.backward(retain_graph=False)
-
-        if activations is None or gradients is None:
-            raise RuntimeError("Failed to capture activations/gradients for Grad-CAM")
-
-        acts = activations[0]  # [C,h,w]
-        grads = gradients[0]   # [C,h,w]
-        weights = grads.mean(dim=(1, 2))
-        cam = (weights[:, None, None] * acts).sum(dim=0)
-        cam = torch.relu(cam)
-        cam = cam - cam.min()
-        cam = cam / (cam.max() + 1e-8)
-
-        cam = torch.nn.functional.interpolate(
-            cam[None, None, ...],
-            size=(224, 224),
-            mode="bilinear",
-            align_corners=False,
-        )[0, 0]
-
-        heatmap_rgb = _jet_colormap(cam)
-        img_tensor = transforms.ToTensor()(input_image_224)  # [3,224,224] in [0,1]
-
-        overlay = ((1 - alpha) * img_tensor + alpha * heatmap_rgb).clamp(0, 1)
-        overlay_pil = to_pil_image(overlay)
-
-        buf = io.BytesIO()
-        overlay_pil.save(buf, format="PNG")
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        return f"data:image/png;base64,{b64}"
-    finally:
-        h1.remove()
-        h2.remove()
-
-
 def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
     detections: list[dict[str, object]] = []
 
     try:
         print(f"Running YOLO inference on image size: {image.size}")
-        # Use very low confidence threshold to catch even weak detections
-        results = yolo_model.predict(source=image, verbose=False, conf=0.01, iou=0.5)
+        results = yolo_model.predict(source=image, verbose=False, conf=0.4, iou=0.45, imgsz=640)
 
         if not results:
             print("No results returned from YOLO")
@@ -190,22 +91,20 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
         result = results[0]
         names = result.names or {}
         img_width, img_height = image.size
+        img_area = img_width * img_height
 
-        print(f"Number of boxes detected: {len(result.boxes)}")
+        print(f"Raw YOLO detections: {len(result.boxes)}")
 
         for box in result.boxes:
             class_id = int(box.cls.item()) if box.cls is not None else -1
             confidence = float(box.conf.item() * 100) if box.conf is not None else 0.0
             x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-            # Calculate box dimensions
-            box_width = x2 - x1
-            box_height = y2 - y1
-            box_area_ratio = (box_width * box_height) / (img_width * img_height)
-
-            # Filter out boxes that cover more than 70% of the image (too general)
-            if box_area_ratio > 0.7:
-                print(f"Skipping large box covering {box_area_ratio*100:.1f}% of image")
+            # Filter: reject boxes that cover >70% of image (likely noise/hallucination)
+            box_area = (x2 - x1) * (y2 - y1)
+            area_ratio = box_area / img_area if img_area > 0 else 0
+            if area_ratio > 0.7:
+                print(f"  Filtered: box area ratio {area_ratio:.1%} too large (>70%)")
                 continue
 
             detection = {
@@ -213,7 +112,7 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
                 "confidence": confidence,
                 "bbox": [x1, y1, x2, y2],
             }
-            print(f"Detection: {detection}")
+            print(f"Detection: {detection} (area_ratio={area_ratio:.1%})")
             detections.append(detection)
 
         print(f"Total specific detections: {len(detections)}")
@@ -223,6 +122,83 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
         traceback.print_exc()
 
     return detections
+
+
+_BOX_COLORS = {
+    "Blackheads": (0, 200, 0),
+    "Cyst":       (0, 255, 100),
+    "Papules":    (0, 230, 50),
+    "Pustules":   (50, 255, 50),
+    "Whiteheads": (0, 180, 80),
+}
+_DEFAULT_BOX_COLOR = (0, 255, 0)
+_FONT      = cv2.FONT_HERSHEY_SIMPLEX
+_FONT_S    = 0.55
+_FONT_T    = 1
+_BOX_T     = 2
+
+
+def _yolo_annotated_image(image: Image.Image, detections: list[dict]) -> str | None:
+    """Draw green bounding boxes on image, return as base64 PNG data URL."""
+    try:
+        img_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        annotated = img_bgr.copy()
+        h, w = annotated.shape[:2]
+
+        # Scale font/thickness relative to image size
+        scale = max(w, h) / 640.0
+        fs = np.clip(0.4 * scale, 0.3, 0.8)
+        ft = np.clip(int(1.5 * scale), 1, 2)
+        bt = np.clip(int(2 * scale), 1, 3)
+
+        # Sort by confidence to label only top detections
+        sorted_dets = sorted(detections, key=lambda x: x["confidence"], reverse=True)
+        top_n = min(3, len(sorted_dets))  # Label only top 3
+
+        for idx, d in enumerate(detections):
+            x1, y1, x2, y2 = map(int, d["bbox"])
+            cls_name = d["class"]
+            conf = d["confidence"] / 100.0
+            color = _BOX_COLORS.get(cls_name, _DEFAULT_BOX_COLOR)
+
+            # Draw box border
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, bt)
+
+            # Draw label only for top-3 detections by confidence
+            if idx < top_n and conf >= 0.35:
+                label = f"{cls_name} {conf:.0%}"
+                (tw, th), baseline = cv2.getTextSize(label, _FONT, fs, ft)
+                label_y = max(y1 - 4, th + 4)
+                cv2.rectangle(annotated, (x1, label_y - th - 3),
+                             (x1 + tw + 4, label_y + baseline), color, cv2.FILLED)
+                cv2.putText(annotated, label, (x1 + 2, label_y - 2),
+                           _FONT, fs, (255, 255, 255), ft, cv2.LINE_AA)
+
+        # Summary only if <= 10 detections
+        if detections and len(detections) <= 10:
+            counts = Counter(d["class"] for d in detections)
+            pad, dy = int(10 * scale), int(20 * scale)
+            y = pad + dy
+            summary_text = f"Acne: {len(detections)}"
+            cv2.putText(annotated, summary_text, (pad, y),
+                        _FONT, max(0.4, 0.5 * scale), (0, 255, 0), ft, cv2.LINE_AA)
+            y += dy
+            for cls_name, cnt in list(counts.items())[:3]:  # Top 3 classes only
+                color = _BOX_COLORS.get(cls_name, _DEFAULT_BOX_COLOR)
+                cv2.putText(annotated, f"{cls_name}: {cnt}", (pad, y),
+                           _FONT, max(0.35, 0.4 * scale), color, ft, cv2.LINE_AA)
+                y += dy
+        elif not detections:
+            cv2.putText(annotated, "No acne detected", (10, int(28 * scale)),
+                       _FONT, max(0.5, 0.6 * scale), (0, 255, 0), ft, cv2.LINE_AA)
+
+        _, buf = cv2.imencode(".png", annotated)
+        b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+        return f"data:image/png;base64,{b64}"
+    except Exception as e:
+        print(f"Error in _yolo_annotated_image: {e}")
+        return None
+
 
 # ---------------- SIGNUP ----------------
 
@@ -292,6 +268,24 @@ async def predict(
     if image.mode != "RGB":
         image = image.convert("RGB")
 
+    # Get YOLO detections first
+    try:
+        detections = _yolo_detections(image)
+    except Exception as e:
+        print(f"Error getting YOLO detections: {e}")
+        detections = []
+
+    # Only classify if acne was detected (avoid hallucination on clear skin)
+    if not detections:
+        yolo_image = _yolo_annotated_image(image, [])
+        return {
+            "prediction": "No acne detected",
+            "confidence": 0.0,
+            "detections": [],
+            "yolo_image": yolo_image,
+        }
+
+    # Classification only if acne detected
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor()
@@ -300,7 +294,6 @@ async def predict(
     image_224 = image.resize((224, 224))
     img_tensor = transform(image).unsqueeze(0)
 
-    # Prediction (no gradients needed)
     with torch.no_grad():
         outputs = model(img_tensor)
         probs = torch.nn.functional.softmax(outputs, dim=1)
@@ -309,36 +302,18 @@ async def predict(
     prediction = CLASS_NAMES[idx.item()]
     confidence_score = float(confidence.item() * 100)
 
-    # Grad-CAM heatmap overlay for the predicted class
-    heatmap = None
-    try:
-        img_tensor_cam = img_tensor.clone().detach().requires_grad_(True)
-        heatmap = _gradcam_overlay_png_data_url(
-            model=model,
-            input_tensor=img_tensor_cam,
-            input_image_224=image_224,
-            class_index=int(idx.item()),
-        )
-    except Exception:
-        heatmap = None
-
-    try:
-        detections = _yolo_detections(image)
-    except Exception as e:
-        print(f"Error getting YOLO detections: {e}")
-        detections = []
+    yolo_image = _yolo_annotated_image(image, detections)
 
     conn = sqlite3.connect("dermai.db")
     c = conn.cursor()
 
     c.execute(
-        "INSERT INTO history (user_id, image_name, prediction, created_at, heatmap) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO history (user_id, image_name, prediction, created_at) VALUES (?, ?, ?, ?)",
         (
             user_id,
             upload.filename,
             prediction,
             datetime.utcnow().isoformat(timespec="seconds"),
-            heatmap,
         )
     )
 
@@ -348,8 +323,8 @@ async def predict(
     return {
         "prediction": prediction,
         "confidence": confidence_score,
-        "heatmap": heatmap,
         "detections": detections,
+        "yolo_image": yolo_image,
     }
 
 # ---------------- HISTORY ----------------
@@ -361,7 +336,7 @@ def get_history(user_id: int):
     c = conn.cursor()
 
     c.execute(
-        "SELECT image_name, prediction, created_at, heatmap FROM history WHERE user_id=? ORDER BY id DESC",
+        "SELECT image_name, prediction, created_at FROM history WHERE user_id=? ORDER BY id DESC",
         (user_id,)
     )
 
@@ -373,7 +348,6 @@ def get_history(user_id: int):
             "image_name": r[0],
             "prediction": r[1],
             "created_at": r[2],
-            "heatmap": r[3],
         }
         for r in records
     ]
@@ -385,8 +359,6 @@ class PdfReportRequest(BaseModel):
     prediction: str
     confidence: float
     original_image: str | None = None
-    heatmap: str | None = None
-    confidences: dict | None = None
 
 @app.post("/generate-pdf")
 def generate_pdf(payload: PdfReportRequest):

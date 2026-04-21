@@ -12,9 +12,8 @@ type ApiResult = {
   prediction?: string;
   predicted_class?: string;
   confidence?: number;
-  confidences?: Record<string, number>;
-  heatmap?: string;
   detections?: Detection[];
+  yolo_image?: string;
   error?: string;
 };
 
@@ -336,13 +335,13 @@ export default function AcneDetector() {
         <div className="border border-gray-800 p-10 rounded-lg flex items-center justify-center">
           {result ? (
             <div className="text-center w-full">
-              {result.heatmap ? (
+              {result.yolo_image ? (
                 <div className="mb-6">
-                  <p className="text-gray-300 mb-3">Acne Heatmap (Grad-CAM)</p>
+                  <p className="text-gray-300 mb-3 font-semibold">YOLO Detection — Acne Localization</p>
                   <img
-                    src={result.heatmap}
-                    className="w-full rounded"
-                    alt="Grad-CAM heatmap overlay"
+                    src={result.yolo_image}
+                    className="w-full rounded border border-green-700"
+                    alt="YOLO bounding box detection"
                   />
                 </div>
               ) : null}
@@ -371,8 +370,6 @@ export default function AcneDetector() {
                       prediction: predictionLabel,
                       confidence: result.confidence,
                       original_image: preview,
-                      heatmap: result.heatmap ?? null,
-                      confidences: result.confidences ?? null,
                     }),
                   });
 
