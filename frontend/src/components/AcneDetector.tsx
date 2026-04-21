@@ -14,6 +14,8 @@ type ApiResult = {
   confidence?: number;
   heatmap?: string;
   detections?: Detection[];
+  severity?: string;
+  recommendation?: string;
   error?: string;
 };
 
@@ -30,6 +32,36 @@ export default function AcneDetector() {
   const [result, setResult] = useState<ApiResult | null>(null);
   const [detections, setDetections] = useState<Detection[]>([]);
   const [loading, setLoading] = useState(false);
+  const [severity, setSeverity] = useState<string>("");
+  function getSeverityStyle(severity: string) {
+    switch (severity) {
+      case "Mild":
+        return "bg-green-100 text-green-700";
+      case "Moderate":
+        return "bg-yellow-100 text-yellow-700";
+      case "Extreme":
+        return "bg-red-100 text-red-700";
+      case "No Acne":
+        return "bg-blue-100 text-blue-700";
+      default:
+        return "bg-gray-100 text-gray-700";
+    }
+  }
+  function getSeverityWidth(severity: string) {
+    switch (severity) {
+      case "Mild":
+        return "33%";
+      case "Moderate":
+        return "66%";
+      case "Extreme":
+        return "100%";
+      case "No Acne":
+        return "0%";
+      default:
+        return "0%";
+    }
+  }
+  const [recommendation, setRecommendation] = useState<string>("");
   const [previewMetrics, setPreviewMetrics] = useState<PreviewMetrics | null>(null);
 
   const [isCameraOpen, setIsCameraOpen] = useState(false);
@@ -54,6 +86,8 @@ export default function AcneDetector() {
     setResult(null);
     setDetections([]);
     setPreviewMetrics(null);
+    setSeverity("");
+    setRecommendation("");
   };
 
   const syncPreviewMetrics = () => {
@@ -200,6 +234,8 @@ export default function AcneDetector() {
 
       setResult(data);
       setDetections(data.detections ?? []);
+      setSeverity(data.severity ?? "");
+      setRecommendation(data.recommendation ?? "");
       setLoading(false);
     } catch (err) {
       console.error(err);
@@ -271,25 +307,28 @@ export default function AcneDetector() {
             </div>
           ) : (
             <div className="border border-dashed border-gray-700 p-16 text-center space-y-4">
-              <div>
+              <div className="flex flex-col items-center gap-4">
                 <p className="text-gray-400 mb-2">Upload acne image</p>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleUpload}
-                  className="text-gray-300"
-                />
-              </div>
 
-              <div className="flex flex-col items-center gap-3">
-                <p className="text-gray-500 text-sm">or</p>
-                <button
-                  type="button"
-                  onClick={openCamera}
-                  className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-black font-semibold rounded"
-                >
-                  Capture Live Photo
-                </button>
+                <div className="flex gap-4">
+                  <label className="cursor-pointer bg-transparent border border-green-500 hover:bg-green-500 hover:text-black text-green-500 px-5 py-2 rounded font-semibold transition-all">
+                    Choose File
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleUpload}
+                      className="hidden"
+                    />
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={openCamera}
+                    className="bg-transparent border border-green-500 hover:bg-green-500 hover:text-black text-green-500 px-5 py-2 rounded font-semibold transition-all"
+                  >
+                    Capture Live Photo
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -361,6 +400,41 @@ export default function AcneDetector() {
                 Confidence: {result?.confidence ? result.confidence.toFixed(2) : "0"}%
               </p>
 
+              {severity && (
+                <div className="mt-3">
+                  <p className="text-gray-400 text-sm mb-1">Severity</p>
+                  <span
+                    className={`px-3 py-1 rounded-full text-sm font-semibold ${getSeverityStyle(severity)}`}
+                  >
+                    {severity}
+                  </span>
+
+                  <div className="w-full bg-gray-800 rounded-full h-2 mt-2">
+                    <div
+                      className={`h-2 rounded-full transition-all duration-500 ${
+                        severity === "Mild"
+                          ? "bg-green-500"
+                          : severity === "Moderate"
+                          ? "bg-yellow-500"
+                          : severity === "Extreme"
+                          ? "bg-red-500"
+                          : "bg-blue-500"
+                      }`}
+                      style={{ width: getSeverityWidth(severity) }}
+                    ></div>
+                  </div>
+                </div>
+              )}
+
+              {recommendation && (
+                <p className="text-gray-400 mt-2">
+                  Recommendation: {recommendation}
+                </p>
+              )}
+              <p className="text-gray-500 text-xs mt-3">
+                ⚠️ This is not medical advice. Consult a dermatologist.
+              </p>
+
               <button
                 onClick={() => {
                   if (!predictionLabel || !result?.confidence) {
@@ -370,11 +444,13 @@ export default function AcneDetector() {
 
                   const url = `${API}/generate-pdf?prediction=${encodeURIComponent(
                     predictionLabel
-                  )}&confidence=${result.confidence}`;
+                  )}&confidence=${result.confidence}&severity=${encodeURIComponent(
+                    severity
+                  )}&recommendation=${encodeURIComponent(recommendation)}`;
 
                   window.open(url, "_blank");
                 }}
-                className="mt-4 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
+                className="mt-6 bg-transparent border border-green-500 hover:bg-green-500 hover:text-black text-green-500 px-6 py-2 rounded font-semibold transition-all"
               >
                 Download Report
               </button>

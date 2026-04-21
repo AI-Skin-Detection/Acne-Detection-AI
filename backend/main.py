@@ -9,11 +9,12 @@ import torch.nn as nn
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from ultralytics import YOLO
+# from ultralytics import YOLO
 from torchvision import models, transforms
 from torchvision.transforms.functional import to_pil_image
 from fastapi.responses import FileResponse
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage
+from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet
 
 app = FastAPI()
@@ -85,7 +86,28 @@ YOLO_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.eval()
 
-yolo_model = YOLO(YOLO_MODEL_PATH)
+
+yolo_model = None  # YOLO temporarily disabled
+
+def get_recommendations(severity, prediction):
+    if severity == "Mild":
+        return [
+            "Use gentle cleanser twice daily",
+            "Apply salicylic acid (1-2%)",
+            "Avoid touching face frequently"
+        ]
+    elif severity == "Moderate":
+        return [
+            "Use benzoyl peroxide (2.5-5%)",
+            "Consider adapalene at night",
+            "Maintain consistent skincare routine"
+        ]
+    else:
+        return [
+            "Consult a dermatologist",
+            "Possible oral medication needed",
+            "Avoid self-treatment for cystic acne"
+        ]
 
 
 def _find_last_conv_layer(m: torch.nn.Module) -> torch.nn.Module:
@@ -175,6 +197,8 @@ def _gradcam_overlay_png_data_url(
 
 
 def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
+    if yolo_model is None:
+        return []
     detections: list[dict[str, object]] = []
 
     results = yolo_model.predict(source=image, verbose=False)
@@ -282,6 +306,7 @@ async def predict(
         confidence, idx = torch.max(probs, 1)
 
     prediction = CLASS_NAMES[idx.item()]
+    prediction = prediction or "Unknown"
     confidence_score = float(confidence.item() * 100)
 
     # Grad-CAM heatmap overlay for the predicted class
@@ -297,10 +322,60 @@ async def predict(
     except Exception:
         heatmap = None
 
+
+    # Safe YOLO handling (in case model not available)
     try:
         detections = _yolo_detections(image)
     except Exception:
         detections = []
+
+    # -------- SEVERITY SCORING --------
+
+    ACNE_SEVERITY_MAP = {
+        "Blackheads": 20,
+        "Whiteheads": 25,
+        "Papules": 50,
+        "Pustules": 65,
+        "Cyst": 85
+    }
+
+    detections = detections or []
+    num_lesions = len(detections)
+
+    if num_lesions == 0:
+        # YOLO not available → fallback to classification-based severity
+        base_score = ACNE_SEVERITY_MAP.get(prediction, 30)
+        final_score = base_score
+
+        if final_score < 30:
+            severity = "Mild"
+        elif final_score < 60:
+            severity = "Moderate"
+        else:
+            severity = "Extreme"
+
+        recommendations = get_recommendations(severity, prediction)
+        recommendation_text = "; ".join(recommendations)
+    else:
+        if num_lesions > 20:
+            count_score = 20
+        elif num_lesions > 10:
+            count_score = 10
+        else:
+            count_score = 5
+
+        base_score = ACNE_SEVERITY_MAP.get(prediction, 30)
+        final_score = min(base_score + count_score, 100)
+
+        if final_score < 30:
+            severity = "Mild"
+        elif final_score < 60:
+            severity = "Moderate"
+        else:
+            severity = "Extreme"
+
+        recommendations = get_recommendations(severity, prediction)
+        recommendation_text = "; ".join(recommendations)
 
     conn = sqlite3.connect("dermai.db")
     c = conn.cursor()
@@ -324,6 +399,10 @@ async def predict(
         "confidence": confidence_score,
         "heatmap": heatmap,
         "detections": detections,
+        "severity": severity,
+        "recommendation": recommendation_text,
+        "score": final_score,
+        "recommendations": recommendations
     }
 
 # ---------------- HISTORY ----------------
@@ -356,9 +435,7 @@ def get_history(user_id: int):
 # ---------------- PDF GENERATION ----------------
 
 @app.get("/generate-pdf")
-def generate_pdf(prediction: str, confidence: float):
-    print("PDF API CALLED ✅")
-
+def generate_pdf(prediction: str, confidence: float, severity: str, recommendation: str):
     file_path = "report.pdf"
 
     doc = SimpleDocTemplate(file_path)
@@ -366,15 +443,47 @@ def generate_pdf(prediction: str, confidence: float):
 
     content = []
 
-    content.append(Paragraph("Acne Detection Report", styles["Title"]))
+    # Logo (optional)
+    import os
+    logo_path = "logo.png"
+    if os.path.exists(logo_path):
+        try:
+            logo = RLImage(logo_path, width=1.2*inch, height=1.2*inch)
+            content.append(logo)
+        except Exception:
+            pass
+
     content.append(Spacer(1, 20))
 
-    content.append(Paragraph("Name: User", styles["Normal"]))
-    content.append(Paragraph(f"Detected Acne Type: {prediction}", styles["Normal"]))
-    content.append(Paragraph(f"Confidence: {confidence:.2f}%", styles["Normal"]))
+    # Title
+    content.append(Paragraph("<b>Acne Detection Report</b>", styles["Title"]))
+    content.append(Spacer(1, 20))
+
+    # Details
+    content.append(Paragraph("<b>Name:</b> User", styles["Normal"]))
+    content.append(Paragraph(f"<b>Detected Acne Type:</b> {prediction}", styles["Normal"]))
+    content.append(Paragraph(f"<b>Confidence:</b> {confidence:.2f}%", styles["Normal"]))
+    content.append(Paragraph(f"<b>Severity:</b> {severity}", styles["Normal"]))
+
+    content.append(Spacer(1, 15))
+
+    # Recommendation
+    content.append(Paragraph("<b>Recommendation:</b>", styles["Heading3"]))
+    content.append(Paragraph(recommendation, styles["Normal"]))
 
     content.append(Spacer(1, 20))
-    content.append(Paragraph("Generated by AI System", styles["Italic"]))
+
+    # Disclaimer
+    content.append(Paragraph("<b>Disclaimer:</b>", styles["Heading3"]))
+    content.append(Paragraph(
+        "This system provides general skincare recommendations for informational purposes only. "
+        "It is not a substitute for professional medical advice. "
+        "Consult a qualified dermatologist before starting any treatment.",
+        styles["Normal"]
+    ))
+
+    content.append(Spacer(1, 30))
+    content.append(Paragraph("<i>Generated by AI System</i>", styles["Italic"]))
 
     doc.build(content)
 
