@@ -334,42 +334,34 @@ async def predict(
     else:
         severity = "Severe"
 
-    # -------- Smart Recommendations (type + severity) --------
+    # -------- SAFE HYBRID RECOMMENDATIONS --------
 
-    if prediction.lower() == "blackheads":
-        if severity == "Mild":
-            recommendation = "Use salicylic acid cleanser and exfoliate gently."
-        elif severity == "Moderate":
-            recommendation = "Use salicylic acid and retinoids regularly."
+    # Detect YOLO vs CNN mismatch
+    yolo_classes = [d["class"].lower() for d in (detections or [])]
+    yolo_class = yolo_classes[0] if len(yolo_classes) > 0 else None
+    cnn_class = (prediction or "").lower()
+
+    prediction_mismatch = False
+    if yolo_class and cnn_class and yolo_class != cnn_class:
+        prediction_mismatch = True
+
+    if severity == "Severe":
+        recommendation = "Consult a dermatologist immediately for proper medical treatment."
+
+    elif prediction_mismatch:
+        recommendation = "Mixed acne patterns detected. Consult a dermatologist for accurate diagnosis."
+
+    elif severity == "Moderate":
+        if cnn_class in ["whiteheads", "blackheads"]:
+            recommendation = "You may consider salicylic acid or benzoyl peroxide."
         else:
-            recommendation = "Consult a dermatologist for advanced treatment."
+            recommendation = "Use gentle anti-acne treatments and monitor skin condition."
 
-    elif prediction.lower() == "whiteheads":
-        if severity == "Mild":
-            recommendation = "Use gentle cleanser and avoid oily products."
-        elif severity == "Moderate":
-            recommendation = "Try benzoyl peroxide or salicylic acid."
-        else:
-            recommendation = "Consult a dermatologist."
+    elif severity == "Mild":
+        recommendation = "Maintain a basic skincare routine with gentle cleansing."
 
-    elif prediction.lower() == "papules":
-        if severity == "Mild":
-            recommendation = "Avoid touching skin and use anti-inflammatory products."
-        elif severity == "Moderate":
-            recommendation = "Use benzoyl peroxide and soothing skincare."
-        else:
-            recommendation = "Seek medical advice."
-
-    elif prediction.lower() == "pustules":
-        if severity == "Mild":
-            recommendation = "Use antibacterial face wash and avoid picking."
-        elif severity == "Moderate":
-            recommendation = "Use benzoyl peroxide or topical antibiotics."
-        else:
-            recommendation = "Consult dermatologist immediately."
-
-    elif prediction.lower() == "cyst":
-        recommendation = "Consult a dermatologist. Avoid self-treatment."
+    elif severity == "No Acne":
+        recommendation = "Your skin looks clear. Maintain a healthy skincare routine."
 
     else:
         recommendation = "Maintain proper skincare routine."
@@ -540,16 +532,9 @@ def generate_pdf(payload: PdfReportRequest):
     content.append(Paragraph("💡 <b>Recommendations</b>", styles["Heading2"]))
     content.append(Spacer(1, 14))
 
-    if payload.severity == "No Acne":
-        rec = "Maintain a consistent skincare routine and keep your skin clean."
-    elif payload.severity == "Mild":
-        rec = "Use a gentle cleanser and non-comedogenic products. Avoid oily cosmetics."
-    elif payload.severity == "Moderate":
-        rec = "Consider salicylic acid or benzoyl peroxide treatments to reduce acne."
-    elif payload.severity == "Severe":
-        rec = "Consult a dermatologist for proper medical treatment."
-    else:
-        rec = "Maintain proper skincare routine."
+    rec = getattr(payload, "recommendation", None)
+    if not rec:
+        rec = "Consult a dermatologist for proper medical advice."
 
     content.append(Paragraph(f"✔ {rec}", styles["Normal"]))
 
