@@ -10,27 +10,18 @@ import NotFound from "./pages/NotFound";
 function App() {
   return (
     <BrowserRouter>
-
       <Routes>
-
-        {/* Main Landing Page */}
         <Route path="/" element={<Index />} />
-
-        {/* Authentication */}
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
-
-        {/* Survey */}
         <Route path="/survey" element={<Survey />} />
-
-        {/* History */}
         <Route path="/history" element={<History />} />
-
-        {/* Catch all */}
         <Route path="*" element={<NotFound />} />
-
       </Routes>
 
+      <div className="text-center text-xs text-gray-400 py-4">
+        ⚠ This tool is for educational purposes only and should not be considered medical advice. Consult a dermatologist.
+      </div>
     </BrowserRouter>
   );
 }

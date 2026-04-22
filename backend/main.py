@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
+from PIL import Image as PILImage
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -17,8 +17,10 @@ from ultralytics import YOLO
 from torchvision import models, transforms
 from torchvision.transforms.functional import to_pil_image
 from fastapi.responses import FileResponse, StreamingResponse
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+from reportlab.graphics.shapes import Drawing, Rect, String
 
 app = FastAPI()
 
@@ -67,8 +69,8 @@ CLASS_NAMES = ['Blackheads', 'Cyst', 'Papules', 'Pustules', 'Whiteheads']
 model = models.resnet50(weights=None)
 model.fc = nn.Linear(model.fc.in_features, 5)
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(os.path.dirname(BASE_DIR), "acne_model_best.pth")
 YOLO_MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
@@ -77,12 +79,12 @@ model.eval()
 yolo_model = YOLO(YOLO_MODEL_PATH)
 
 
-def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
+def _yolo_detections(image: PILImage.Image) -> list[dict[str, object]]:
     detections: list[dict[str, object]] = []
 
     try:
         print(f"Running YOLO inference on image size: {image.size}")
-        results = yolo_model.predict(source=image, verbose=False, conf=0.55, iou=0.45, imgsz=640)
+        results = yolo_model.predict(source=image, verbose=False, conf=0.65, iou=0.4, imgsz=640)
 
         if not results:
             print("No results returned from YOLO")
@@ -104,7 +106,17 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
             box_area = (x2 - x1) * (y2 - y1)
             area_ratio = box_area / img_area if img_area > 0 else 0
             if area_ratio > 0.7:
-                print(f"  Filtered: box area ratio {area_ratio:.1%} too large (>70%)")
+                print(f"  Filtered: box too large")
+                continue
+
+            # NEW: filter very small noise detections
+            if area_ratio < 0.001:
+                print(f"  Filtered: box too small (noise)")
+                continue
+
+            # NEW: filter low confidence noise
+            if confidence < 40:
+                print(f"  Filtered: low confidence ({confidence:.1f}%)")
                 continue
 
             detection = {
@@ -138,7 +150,7 @@ _FONT_T    = 1
 _BOX_T     = 2
 
 
-def _yolo_annotated_image(image: Image.Image, detections: list[dict]) -> str | None:
+def _yolo_annotated_image(image: PILImage.Image, detections: list[dict]) -> str | None:
     """Draw green bounding boxes on image, return as base64 PNG data URL."""
     try:
         img_bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -263,7 +275,7 @@ async def predict(
         return {"error": "No image uploaded"}
 
     contents = await upload.read()
-    image = Image.open(io.BytesIO(contents))
+    image = PILImage.open(io.BytesIO(contents))
 
     if image.mode != "RGB":
         image = image.convert("RGB")
@@ -302,6 +314,72 @@ async def predict(
     prediction = CLASS_NAMES[idx.item()]
     confidence_score = float(confidence.item() * 100)
 
+    # -------- Improved Severity (YOLO + Confidence) --------
+    detection_count = len(detections)
+
+    if detection_count > 0:
+        avg_conf = sum([d["confidence"] for d in detections]) / detection_count
+    else:
+        avg_conf = 0
+
+    severity_score = min(int((detection_count * 15) + (avg_conf * 0.5)), 100)
+
+    if detection_count == 0:
+        severity = "No Acne"
+        severity_score = 0
+    elif severity_score < 30:
+        severity = "Mild"
+    elif severity_score < 65:
+        severity = "Moderate"
+    else:
+        severity = "Severe"
+
+    # -------- Smart Recommendations (type + severity) --------
+
+    if prediction.lower() == "blackheads":
+        if severity == "Mild":
+            recommendation = "Use salicylic acid cleanser and exfoliate gently."
+        elif severity == "Moderate":
+            recommendation = "Use salicylic acid and retinoids regularly."
+        else:
+            recommendation = "Consult a dermatologist for advanced treatment."
+
+    elif prediction.lower() == "whiteheads":
+        if severity == "Mild":
+            recommendation = "Use gentle cleanser and avoid oily products."
+        elif severity == "Moderate":
+            recommendation = "Try benzoyl peroxide or salicylic acid."
+        else:
+            recommendation = "Consult a dermatologist."
+
+    elif prediction.lower() == "papules":
+        if severity == "Mild":
+            recommendation = "Avoid touching skin and use anti-inflammatory products."
+        elif severity == "Moderate":
+            recommendation = "Use benzoyl peroxide and soothing skincare."
+        else:
+            recommendation = "Seek medical advice."
+
+    elif prediction.lower() == "pustules":
+        if severity == "Mild":
+            recommendation = "Use antibacterial face wash and avoid picking."
+        elif severity == "Moderate":
+            recommendation = "Use benzoyl peroxide or topical antibiotics."
+        else:
+            recommendation = "Consult dermatologist immediately."
+
+    elif prediction.lower() == "cyst":
+        recommendation = "Consult a dermatologist. Avoid self-treatment."
+
+    else:
+        recommendation = "Maintain proper skincare routine."
+
+    disclaimer = (
+        "This system uses AI models for educational purposes only. "
+        "Predictions and recommendations may not always be accurate. "
+        "Please consult a certified dermatologist for medical advice."
+    )
+
     yolo_image = _yolo_annotated_image(image, detections)
 
     conn = sqlite3.connect("dermai.db")
@@ -325,6 +403,10 @@ async def predict(
         "confidence": confidence_score,
         "detections": detections,
         "yolo_image": yolo_image,
+        "severity": severity,
+        "severity_score": severity_score,
+        "recommendation": recommendation,
+        "disclaimer": disclaimer
     }
 
 # ---------------- HISTORY ----------------
@@ -358,6 +440,8 @@ def get_history(user_id: int):
 class PdfReportRequest(BaseModel):
     prediction: str
     confidence: float
+    severity: str | None = None
+    severity_score: int | None = None
     original_image: str | None = None
 
 @app.post("/generate-pdf")
@@ -370,15 +454,117 @@ def generate_pdf(payload: PdfReportRequest):
 
     content = []
 
-    content.append(Paragraph("Acne Detection Report", styles["Title"]))
+    # Logo (centered)
+    import os
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    logo_path = os.path.join(BASE_DIR, "logo.png")
+
+    logo = RLImage(logo_path, width=140, height=60)
+    content.append(Table([[logo]], hAlign='CENTER'))
     content.append(Spacer(1, 20))
 
-    content.append(Paragraph("Name: User", styles["Normal"]))
-    content.append(Paragraph(f"Detected Acne Type: {payload.prediction}", styles["Normal"]))
-    content.append(Paragraph(f"Confidence: {payload.confidence:.2f}%", styles["Normal"]))
+    # Title
+    content.append(Paragraph("<b><font color='#22c55e'>DERMA AI ANALYSIS REPORT</font></b>", styles["Title"]))
+    content.append(Spacer(1, 8))
+    content.append(HRFlowable(width="100%", thickness=1, color="#cccccc"))
+    content.append(Spacer(1, 12))
+    content.append(Paragraph("AI-Based Acne Detection System", styles["Italic"]))
+    content.append(Spacer(1, 20))
+
+    # Summary Section
+    content.append(Paragraph("<b>Patient Summary</b>", styles["Heading2"]))
+    content.append(Spacer(1, 14))
+    content.append(Paragraph(f"🧴 <b>Detected Type:</b> <font color='#22c55e'>{payload.prediction}</font>", styles["Normal"]))
+    content.append(Paragraph(f"📊 <b>Confidence:</b> <font color='#22c55e'>{payload.confidence:.2f}%</font>", styles["Normal"]))
+    if payload.severity:
+        content.append(Paragraph(f"⚠️ <b>Severity:</b> <font color='#facc15'>{payload.severity}</font>", styles["Normal"]))
+
+    content.append(Spacer(1, 16))
+
+    # Detection Stats
+    if payload.severity_score is not None:
+        content.append(Paragraph("📌 <b>Detection Summary</b>", styles["Heading2"]))
+        content.append(Spacer(1, 10))
+
+        if payload.severity_score == 0:
+            content.append(Paragraph("No acne detected.", styles["Normal"]))
+        else:
+            content.append(Paragraph(
+                f"Estimated acne severity score: {payload.severity_score}% based on detected regions.",
+                styles["Normal"]
+            ))
+
+        content.append(Spacer(1, 16))
+
+    # Severity Section
+    content.append(Paragraph("<b>Severity Assessment</b>", styles["Heading2"]))
+    content.append(Spacer(1, 14))
+
+    if payload.severity:
+        content.append(Paragraph(
+            f"⚠️ <b>Severity Level:</b> <font color='#22c55e'>{payload.severity}</font>" if payload.severity == "Mild" else
+            f"⚠️ <b>Severity Level:</b> <font color='#facc15'>{payload.severity}</font>" if payload.severity == "Moderate" else
+            f"⚠️ <b>Severity Level:</b> <font color='#ef4444'>{payload.severity}</font>",
+            styles["Normal"]
+        ))
+    else:
+        content.append(Paragraph("Severity information not available.", styles["Normal"]))
+
+    content.append(Spacer(1, 16))
+
+    # Severity Color Bar
+    if payload.severity_score is not None:
+        bar_width = 400
+        bar_height = 15
+        score_width = int((payload.severity_score / 100) * bar_width)
+
+        # Choose color based on severity
+        if payload.severity == "Severe":
+            bar_color = colors.red
+        elif payload.severity == "Moderate":
+            bar_color = colors.orange
+        elif payload.severity == "Mild":
+            bar_color = colors.green
+        else:
+            bar_color = colors.green
+
+        d = Drawing(bar_width, 30)
+        d.add(Rect(0, 10, bar_width, bar_height, fillColor=colors.lightgrey, strokeWidth=0))
+        d.add(Rect(0, 10, score_width, bar_height, fillColor=bar_color, strokeWidth=0))
+        d.add(String(0, 0, f"Severity Score: {payload.severity_score}%", fontSize=10))
+
+        content.append(d)
+        content.append(Spacer(1, 20))
+
+    # Recommendation Section
+    content.append(Paragraph("💡 <b>Recommendations</b>", styles["Heading2"]))
+    content.append(Spacer(1, 14))
+
+    if payload.severity == "No Acne":
+        rec = "Maintain a consistent skincare routine and keep your skin clean."
+    elif payload.severity == "Mild":
+        rec = "Use a gentle cleanser and non-comedogenic products. Avoid oily cosmetics."
+    elif payload.severity == "Moderate":
+        rec = "Consider salicylic acid or benzoyl peroxide treatments to reduce acne."
+    elif payload.severity == "Severe":
+        rec = "Consult a dermatologist for proper medical treatment."
+    else:
+        rec = "Maintain proper skincare routine."
+
+    content.append(Paragraph(f"✔ {rec}", styles["Normal"]))
 
     content.append(Spacer(1, 20))
-    content.append(Paragraph("Generated by AI System", styles["Italic"]))
+
+    # Disclaimer
+    content.append(Paragraph("⚠️ <b>Disclaimer</b>", styles["Heading3"]))
+    content.append(Spacer(1, 8))
+    content.append(Paragraph(
+        "This report is generated using AI and is not a substitute for professional medical advice. Consult a certified dermatologist.",
+        styles["Normal"]
+    ))
+
+    content.append(Spacer(1, 25))
+    content.append(Paragraph("<i>Generated by DERMA AI System</i>", styles["Italic"]))
 
     doc.build(content)
     pdf_buffer.seek(0)
