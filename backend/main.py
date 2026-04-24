@@ -51,9 +51,15 @@ def init_db():
             user_id INTEGER,
             image_name TEXT,
             prediction TEXT,
-            created_at TEXT
+            created_at TEXT,
+            yolo_image TEXT
         )
     """)
+
+    try:
+        c.execute("ALTER TABLE history ADD COLUMN yolo_image TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
@@ -63,37 +69,99 @@ init_db()
 # ---------------- LOAD MODEL ----------------
 
 CLASS_NAMES = ['Blackheads', 'Cyst', 'Papules', 'Pustules', 'Whiteheads']
+YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
+YOLO_MAX_DETECTIONS = int(os.getenv("YOLO_MAX_DETECTIONS", "10"))
+YOLO_CONFIDENCE_FALLBACKS = [
+    float(value.strip())
+    for value in os.getenv("YOLO_CONFIDENCE_FALLBACKS", "0.25,0.10,0.05,0.01").split(",")
+    if value.strip()
+]
 
 model = models.resnet50(weights=None)
 model.fc = nn.Linear(model.fc.in_features, 5)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
-YOLO_MODEL_PATH = os.path.join(BASE_DIR, "last.pt")
+YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", os.path.join(BASE_DIR, "last.pt"))
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.eval()
 
-yolo_model = YOLO(YOLO_MODEL_PATH)
+yolo_model = None
+yolo_status = "not_configured"
+yolo_load_error = None
+
+if os.path.exists(YOLO_MODEL_PATH):
+    try:
+        yolo_model = YOLO(YOLO_MODEL_PATH)
+        yolo_status = "loaded"
+    except Exception as e:
+        yolo_status = "load_failed"
+        yolo_load_error = str(e)
+else:
+    yolo_load_error = f"YOLO model file not found: {YOLO_MODEL_PATH}"
+
+resnet_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
 
 
-def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
+def _classify_region(image: Image.Image) -> tuple[str, float]:
+    img_tensor = resnet_transform(image).unsqueeze(0)
+
+    with torch.no_grad():
+        outputs = model(img_tensor)
+        probs = torch.nn.functional.softmax(outputs, dim=1)
+        confidence, idx = torch.max(probs, 1)
+
+    return CLASS_NAMES[idx.item()], float(confidence.item() * 100)
+
+
+def _yolo_detections(image: Image.Image) -> tuple[list[dict[str, object]], float | None]:
     detections: list[dict[str, object]] = []
+
+    if yolo_model is None:
+        print(f"YOLO unavailable: {yolo_load_error}")
+        return detections, None
 
     try:
         print(f"Running YOLO inference on image size: {image.size}")
-        results = yolo_model.predict(source=image, verbose=False, conf=0.45, iou=0.45, imgsz=640)
+        thresholds = []
+        for threshold in [YOLO_CONFIDENCE, *YOLO_CONFIDENCE_FALLBACKS]:
+            if threshold not in thresholds:
+                thresholds.append(threshold)
 
-        if not results:
-            print("No results returned from YOLO")
-            return detections
+        used_confidence = None
+        result = None
 
-        result = results[0]
-        names = result.names or {}
+        for threshold in thresholds:
+            results = yolo_model.predict(
+                source=image,
+                verbose=False,
+                conf=threshold,
+                iou=0.45,
+                imgsz=640,
+                max_det=YOLO_MAX_DETECTIONS,
+            )
+
+            if not results:
+                print(f"No results returned from YOLO at conf={threshold}")
+                continue
+
+            result = results[0]
+            raw_count = len(result.boxes)
+            print(f"Raw YOLO detections at conf={threshold}: {raw_count}")
+
+            if raw_count > 0:
+                used_confidence = threshold
+                break
+
+        if result is None or used_confidence is None:
+            return detections, None
+
         img_width, img_height = image.size
         img_area = img_width * img_height
-
-        print(f"Raw YOLO detections: {len(result.boxes)}")
 
         for box in result.boxes:
             class_id = int(box.cls.item()) if box.cls is not None else -1
@@ -104,24 +172,41 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
             box_area = (x2 - x1) * (y2 - y1)
             area_ratio = box_area / img_area if img_area > 0 else 0
             if area_ratio > 0.6:
-                print(f"  Filtered: box area ratio {area_ratio:.1%} too large (>70%)")
+                print(f"  Filtered: box area ratio {area_ratio:.1%} too large (>60%)")
                 continue
 
+            crop_box = (
+                max(0, int(round(x1))),
+                max(0, int(round(y1))),
+                min(img_width, int(round(x2))),
+                min(img_height, int(round(y2))),
+            )
+
+            if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
+                print(f"  Filtered: invalid box {crop_box}")
+                continue
+
+            crop = image.crop(crop_box)
+            resnet_class, resnet_confidence = _classify_region(crop)
+
             detection = {
-                "class": names.get(class_id, str(class_id)),
-                "confidence": confidence,
-                "bbox": [x1, y1, x2, y2],
+                "class": resnet_class,
+                "confidence": resnet_confidence,
+                "bbox": list(crop_box),
+                "detector_class": class_id,
+                "detector_confidence": confidence,
             }
             print(f"Detection: {detection} (area_ratio={area_ratio:.1%})")
             detections.append(detection)
 
         print(f"Total specific detections: {len(detections)}")
+        return detections, used_confidence
     except Exception as e:
         import traceback
         print(f"YOLO Error: {e}")
         traceback.print_exc()
 
-    return detections
+    return detections, None
 
 
 _BOX_COLORS = {
@@ -151,9 +236,13 @@ def _yolo_annotated_image(image: Image.Image, detections: list[dict]) -> str | N
         ft = np.clip(int(1.5 * scale), 1, 2)
         bt = np.clip(int(2 * scale), 1, 3)
 
-        # Sort by confidence to label only top detections
-        sorted_dets = sorted(detections, key=lambda x: x["confidence"], reverse=True)
-        top_n = min(3, len(sorted_dets))  # Label only top 3
+        # Label only the top 3 regions by ResNet confidence.
+        sorted_dets = sorted(
+            enumerate(detections),
+            key=lambda item: item[1]["confidence"],
+            reverse=True,
+        )
+        top_label_indexes = {idx for idx, _ in sorted_dets[:3]}
 
         for idx, d in enumerate(detections):
             x1, y1, x2, y2 = map(int, d["bbox"])
@@ -164,8 +253,7 @@ def _yolo_annotated_image(image: Image.Image, detections: list[dict]) -> str | N
             # Draw box border
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, bt)
 
-            # Draw label only for top-3 detections by confidence
-            if idx < top_n and conf >= 0.35:
+            if idx in top_label_indexes and conf >= 0.35:
                 label = f"{cls_name} {conf:.0%}"
                 (tw, th), baseline = cv2.getTextSize(label, _FONT, fs, ft)
                 label_y = max(y1 - 4, th + 4)
@@ -188,10 +276,6 @@ def _yolo_annotated_image(image: Image.Image, detections: list[dict]) -> str | N
                 cv2.putText(annotated, f"{cls_name}: {cnt}", (pad, y),
                            _FONT, max(0.35, 0.4 * scale), color, ft, cv2.LINE_AA)
                 y += dy
-        elif not detections:
-            cv2.putText(annotated, "No acne detected", (10, int(28 * scale)),
-                       _FONT, max(0.5, 0.6 * scale), (0, 255, 0), ft, cv2.LINE_AA)
-
         _, buf = cv2.imencode(".png", annotated)
         b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
         return f"data:image/png;base64,{b64}"
@@ -268,39 +352,44 @@ async def predict(
     if image.mode != "RGB":
         image = image.convert("RGB")
 
+    if yolo_model is None:
+        return {
+            "error": "YOLO detector model is not available. Add last.pt to the project root or set YOLO_MODEL_PATH.",
+            "prediction": "Detector unavailable",
+            "confidence": 0.0,
+            "detections": [],
+            "yolo_image": None,
+            "yolo_status": yolo_status,
+            "yolo_error": yolo_load_error,
+        }
+
     # Get YOLO detections first
     try:
-        detections = _yolo_detections(image)
+        detections, used_yolo_confidence = _yolo_detections(image)
     except Exception as e:
         print(f"Error getting YOLO detections: {e}")
         detections = []
+        used_yolo_confidence = None
 
     # Only classify if acne was detected (avoid hallucination on clear skin)
     if not detections:
         yolo_image = _yolo_annotated_image(image, [])
         return {
-            "prediction": "No acne detected",
+            "prediction": "No YOLO regions detected",
             "confidence": 0.0,
             "detections": [],
             "yolo_image": yolo_image,
+            "yolo_status": yolo_status,
+            "used_yolo_confidence": used_yolo_confidence,
+            "message": "YOLO returned no boxes, so ResNet was not run on any crop.",
         }
 
-    # Classification only if acne detected
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
-
-    image_224 = image.resize((224, 224))
-    img_tensor = transform(image).unsqueeze(0)
-
-    with torch.no_grad():
-        outputs = model(img_tensor)
-        probs = torch.nn.functional.softmax(outputs, dim=1)
-        confidence, idx = torch.max(probs, 1)
-
-    prediction = CLASS_NAMES[idx.item()]
-    confidence_score = float(confidence.item() * 100)
+    counts = Counter(d["class"] for d in detections)
+    prediction = counts.most_common(1)[0][0]
+    matching_confidences = [
+        float(d["confidence"]) for d in detections if d["class"] == prediction
+    ]
+    confidence_score = sum(matching_confidences) / len(matching_confidences)
 
     yolo_image = _yolo_annotated_image(image, detections)
 
@@ -308,12 +397,13 @@ async def predict(
     c = conn.cursor()
 
     c.execute(
-        "INSERT INTO history (user_id, image_name, prediction, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO history (user_id, image_name, prediction, created_at, yolo_image) VALUES (?, ?, ?, ?, ?)",
         (
             user_id,
             upload.filename,
             prediction,
             datetime.utcnow().isoformat(timespec="seconds"),
+            yolo_image,
         )
     )
 
@@ -325,6 +415,9 @@ async def predict(
         "confidence": confidence_score,
         "detections": detections,
         "yolo_image": yolo_image,
+        "yolo_status": yolo_status,
+        "used_yolo_confidence": used_yolo_confidence,
+        "message": "YOLO detected regions; ResNet classified each cropped region.",
     }
 
 # ---------------- HISTORY ----------------
@@ -336,7 +429,7 @@ def get_history(user_id: int):
     c = conn.cursor()
 
     c.execute(
-        "SELECT image_name, prediction, created_at FROM history WHERE user_id=? ORDER BY id DESC",
+        "SELECT image_name, prediction, created_at, yolo_image FROM history WHERE user_id=? ORDER BY id DESC",
         (user_id,)
     )
 
@@ -348,6 +441,8 @@ def get_history(user_id: int):
             "image_name": r[0],
             "prediction": r[1],
             "created_at": r[2],
+            "yolo_image": r[3],
+            "heatmap": r[3],
         }
         for r in records
     ]
