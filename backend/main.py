@@ -69,7 +69,7 @@ model.fc = nn.Linear(model.fc.in_features, 5)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
-YOLO_MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
+YOLO_MODEL_PATH = os.path.join(BASE_DIR, "last.pt")
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.eval()
@@ -82,7 +82,7 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
 
     try:
         print(f"Running YOLO inference on image size: {image.size}")
-        results = yolo_model.predict(source=image, verbose=False, conf=0.55, iou=0.45, imgsz=640)
+        results = yolo_model.predict(source=image, verbose=False, conf=0.45, iou=0.45, imgsz=640)
 
         if not results:
             print("No results returned from YOLO")
@@ -100,10 +100,10 @@ def _yolo_detections(image: Image.Image) -> list[dict[str, object]]:
             confidence = float(box.conf.item() * 100) if box.conf is not None else 0.0
             x1, y1, x2, y2 = box.xyxy[0].tolist()
 
-            # Filter: reject boxes that cover >70% of image (likely noise/hallucination)
+            # Filter: reject boxes that cover >60% of image (likely noise/hallucination)
             box_area = (x2 - x1) * (y2 - y1)
             area_ratio = box_area / img_area if img_area > 0 else 0
-            if area_ratio > 0.7:
+            if area_ratio > 0.6:
                 print(f"  Filtered: box area ratio {area_ratio:.1%} too large (>70%)")
                 continue
 
