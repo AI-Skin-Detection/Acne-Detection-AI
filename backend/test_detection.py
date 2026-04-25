@@ -1,16 +1,20 @@
 """Quick test of YOLO detection on different images."""
-import sys
-sys.path.insert(0, '.')
+from pathlib import Path
 
-from main import _yolo_detections
+from backend.main import _yolo_detections, yolo_load_error, yolo_status
 from PIL import Image
+
+BASE_DIR = Path(__file__).resolve().parents[1]
 
 # Test on a few images
 test_images = [
-    '../test_images/blackhead_image.png',
-    '../test_images/cyst_image.png',
-    '../test_images/pustule_image.png',
+    BASE_DIR / 'test_images' / 'blackhead_image.png',
+    BASE_DIR / 'test_images' / 'Pustules_image.png',
 ]
+
+print(f"YOLO status: {yolo_status}")
+if yolo_load_error:
+    print(f"YOLO load error: {yolo_load_error}")
 
 for img_path in test_images:
     try:
@@ -18,7 +22,7 @@ for img_path in test_images:
         print(f"\n{'='*60}")
         print(f"Testing: {img_path} (size: {img.size})")
         print('='*60)
-        dets = _yolo_detections(img)
-        print(f"✓ Result: {len(dets)} detections\n")
+        dets, used_conf = _yolo_detections(img)
+        print(f"Result: {len(dets)} detections at conf={used_conf}\n")
     except Exception as e:
-        print(f"✗ Error: {e}\n")
+        print(f"Error: {e}\n")

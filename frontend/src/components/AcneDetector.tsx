@@ -6,6 +6,8 @@ type Detection = {
   class: string;
   confidence: number;
   bbox: [number, number, number, number];
+  detector_confidence?: number;
+  detector_class?: number;
 };
 
 type ApiResult = {
@@ -348,7 +350,7 @@ export default function AcneDetector() {
             <div className="text-center w-full">
               {result.yolo_image ? (
                 <div className="mb-6">
-                  <p className="text-gray-300 mb-3 font-semibold">YOLO Detection — Acne Localization</p>
+                  <p className="text-gray-300 mb-3 font-semibold">YOLO Boxes + ResNet Crop Labels</p>
                   <img
                     src={result.yolo_image}
                     className="w-full rounded border border-green-700"
@@ -365,6 +367,28 @@ export default function AcneDetector() {
                 Confidence: {result?.confidence ? result.confidence.toFixed(2) : "0"}%
               </p>
 
+              {detections.length > 0 ? (
+                <div className="mt-6 space-y-3 text-left">
+                  {detections.map((detection, index) => (
+                    <div
+                      key={`${detection.bbox.join("-")}-${index}`}
+                      className="border border-gray-800 rounded p-3"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-green-400 font-semibold">
+                          {detection.class}
+                        </span>
+                        <span className="text-gray-300 text-sm">
+                          ResNet {detection.confidence.toFixed(2)}%
+                        </span>
+                      </div>
+                      <p className="text-gray-500 text-xs mt-1">
+                        YOLO box {detection.detector_confidence?.toFixed(2) ?? "0.00"}%
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {/* Severity */}
               {result.severity && (
                 <>
