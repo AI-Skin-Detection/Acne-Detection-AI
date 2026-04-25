@@ -16,6 +16,10 @@ type ApiResult = {
   confidence?: number;
   detections?: Detection[];
   yolo_image?: string;
+  severity?: string;
+  severity_score?: number;
+  recommendation?: string;
+  disclaimer?: string;
   error?: string;
 };
 
@@ -272,8 +276,15 @@ export default function AcneDetector() {
                   type="file"
                   accept="image/*"
                   onChange={handleUpload}
-                  className="text-gray-300"
+                  className="hidden"
+                  id="fileUpload"
                 />
+                <label
+                  htmlFor="fileUpload"
+                  className="inline-block px-4 py-2 border border-green-500 text-green-500 rounded hover:bg-green-500 hover:text-black transition cursor-pointer"
+                >
+                  Choose File
+                </label>
               </div>
 
               <div className="flex flex-col items-center gap-3">
@@ -281,7 +292,7 @@ export default function AcneDetector() {
                 <button
                   type="button"
                   onClick={openCamera}
-                  className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-black font-semibold rounded"
+                  className="px-4 py-2 border border-green-500 text-green-500 rounded hover:bg-green-500 hover:text-black transition"
                 >
                   Capture Live Photo
                 </button>
@@ -378,6 +389,59 @@ export default function AcneDetector() {
                   ))}
                 </div>
               ) : null}
+              {/* Severity */}
+              {result.severity && (
+                <>
+                  {
+                    // Severity color helper and usage
+                  }
+                  {(() => {
+                    const getSeverityStyles = (severity?: string) => {
+                      switch (severity) {
+                        case "No Acne":
+                          return { bar: "bg-green-500", text: "text-green-400" };
+                        case "Mild":
+                          return { bar: "bg-green-400", text: "text-green-300" };
+                        case "Moderate":
+                          return { bar: "bg-yellow-400", text: "text-yellow-400" };
+                        case "Severe":
+                          return { bar: "bg-red-500", text: "text-red-500" };
+                        default:
+                          return { bar: "bg-gray-500", text: "text-gray-400" };
+                      }
+                    };
+                    const styles = getSeverityStyles(result.severity);
+                    return (
+                      <div className="mt-4">
+                        <p className="text-gray-300 mb-1">Severity</p>
+                        <div className="w-full bg-gray-700 rounded-full h-3">
+                          <div
+                            className={`h-3 rounded-full ${styles.bar}`}
+                            style={{ width: `${result.severity_score ?? 0}%` }}
+                          ></div>
+                        </div>
+                        <p className={`text-sm mt-1 ${styles.text}`}>
+                          {result.severity}
+                        </p>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+
+              {/* Recommendation */}
+              {result.recommendation && (
+                <p className="mt-4 text-gray-300">
+                  Recommendation: {result.recommendation}
+                </p>
+              )}
+
+              {/* Disclaimer */}
+              {result.disclaimer && (
+                <p className="text-yellow-400 text-xs mt-2">
+                  ⚠ {result.disclaimer}
+                </p>
+              )}
 
               <button
                 onClick={async () => {
@@ -394,7 +458,10 @@ export default function AcneDetector() {
                     body: JSON.stringify({
                       prediction: predictionLabel,
                       confidence: result.confidence,
-                      original_image: preview,
+                      severity: result.severity,
+                      severity_score: result.severity_score,
+                      recommendation: result.recommendation,
+                      disclaimer: result.disclaimer,
                     }),
                   });
 
@@ -410,7 +477,7 @@ export default function AcneDetector() {
                   a.click();
                   URL.revokeObjectURL(a.href);
                 }}
-                className="mt-4 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
+                className="mt-4 px-4 py-2 bg-green-500 text-black rounded hover:bg-green-600 transition"
               >
                 Download Report
               </button>
