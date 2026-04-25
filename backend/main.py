@@ -251,6 +251,32 @@ async def predict(
     prediction = CLASS_NAMES[idx.item()]
     confidence_score = float(confidence.item() * 100)
 
+    # -------- Severity Logic --------
+    if confidence_score < 40:
+        severity = "Mild Acne"
+        severity_score = 30
+    elif confidence_score < 70:
+        severity = "Moderate Acne"
+        severity_score = 60
+    else:
+        severity = "Severe Acne"
+        severity_score = 85
+
+    # -------- Recommendation Logic --------
+    def get_recommendation(pred, sev):
+        if "Mild" in sev:
+            return "Maintain a gentle skincare routine, cleanse twice daily, and avoid touching your face frequently."
+        elif "Moderate" in sev:
+            return "Consider using dermatologist-approved treatments such as salicylic acid or benzoyl peroxide and maintain consistency."
+        elif "Severe" in sev:
+            return "It is strongly recommended to consult a dermatologist for proper medical evaluation and treatment."
+        return "Maintain a healthy skincare routine."
+
+    recommendation = get_recommendation(prediction, severity)
+
+    # -------- Disclaimer --------
+    disclaimer = "This report is generated using an AI-based system and is intended for informational purposes only. It should not be considered a medical diagnosis."
+
     # Grad-CAM heatmap overlay for the predicted class
     heatmap = None
     try:
@@ -284,6 +310,10 @@ async def predict(
     return {
         "prediction": prediction,
         "confidence": confidence_score,
+        "severity": severity,
+        "severity_score": severity_score,
+        "recommendation": recommendation,
+        "disclaimer": disclaimer,
         "heatmap": heatmap,
     }
 
@@ -312,3 +342,67 @@ def get_history(user_id: int):
         }
         for r in records
     ]
+@app.post("/report")
+async def generate_report(data: dict):
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+    from reportlab.graphics.shapes import Drawing, Rect
+    from fastapi.responses import StreamingResponse
+    import io
+    from datetime import datetime
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer)
+    styles = getSampleStyleSheet()
+
+    content = []
+
+    content.append(Paragraph("<b>DermAI Skin Analysis Report</b>", styles["Title"]))
+    content.append(Spacer(1, 10))
+
+    content.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
+    content.append(Spacer(1, 15))
+
+    table_data = [
+        ["Parameter", "Value"],
+        ["Prediction", data.get("prediction")],
+        ["Confidence", f"{data.get('confidence'):.2f}%"],
+        ["Severity", data.get("severity")],
+    ]
+
+    table = Table(table_data)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.green),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 1, colors.grey),
+    ]))
+
+    content.append(table)
+    content.append(Spacer(1, 20))
+
+    content.append(Paragraph("<b>Recommendation</b>", styles["Heading2"]))
+    content.append(Paragraph(data.get("recommendation"), styles["Normal"]))
+    content.append(Spacer(1, 15))
+
+    severity = data.get("severity")
+    color_map = {
+        "Mild Acne": colors.green,
+        "Moderate Acne": colors.orange,
+        "Severe Acne": colors.red,
+    }
+
+    bar = Drawing(400, 15)
+    bar.add(Rect(0, 0, 400, 15, fillColor=color_map.get(severity, colors.grey)))
+
+    content.append(Paragraph("<b>Severity Level</b>", styles["Heading3"]))
+    content.append(bar)
+    content.append(Spacer(1, 15))
+
+    content.append(Paragraph("<b>Disclaimer</b>", styles["Heading3"]))
+    content.append(Paragraph(data.get("disclaimer"), styles["Italic"]))
+
+    doc.build(content)
+    buffer.seek(0)
+
+    return StreamingResponse(buffer, media_type="application/pdf")

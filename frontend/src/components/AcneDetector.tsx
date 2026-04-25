@@ -9,25 +9,14 @@ export default function AcneDetector() {
   const [loading, setLoading] = useState(false);
 
   const [isCameraOpen, setIsCameraOpen] = useState(false);
-  const [isCameraReady, setIsCameraReady] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  const predictionLabel = result?.prediction ?? result?.predicted_class;
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    setIsCameraOpen(false);
-    setIsCameraReady(false);
-  };
+  const predictionLabel = result?.prediction;
 
   const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-
     if (file) {
       setSelectedFile(file);
       setPreview(URL.createObjectURL(file));
@@ -36,20 +25,25 @@ export default function AcneDetector() {
     }
   };
 
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setIsCameraOpen(false);
+  };
+
   const openCamera = async () => {
     try {
       setIsCameraOpen(true);
-      setIsCameraReady(false);
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
-      setResult(null);
-    } catch (err) {
-      console.error("Error accessing camera:", err);
-      alert("Could not access camera. Please check browser permissions.");
+    } catch {
+      alert("Camera permission denied");
     }
   };
 
@@ -59,171 +53,139 @@ export default function AcneDetector() {
 
     if (!video || !canvas) return;
 
-    const width = video.videoWidth || 640;
-    const height = video.videoHeight || 480;
-
-    canvas.width = width;
-    canvas.height = height;
-
     const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
 
-    ctx.drawImage(video, 0, 0, width, height);
-
-    canvas.toBlob((blob) => {
-      if (!blob) return;
-
-      const file = new File([blob], "captured-image.png", {
-        type: "image/png",
+    if (ctx) {
+      ctx.drawImage(video, 0, 0);
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const file = new File([blob], "captured.png", { type: "image/png" });
+        setSelectedFile(file);
+        setPreview(canvas.toDataURL("image/png"));
+        setResult(null);
+        stopCamera();
       });
-
-      setSelectedFile(file);
-      setPreview(canvas.toDataURL("image/png"));
-      setResult(null);
-      stopCamera();
-    }, "image/png");
+    }
   };
 
   useEffect(() => {
-    return () => {
-      stopCamera();
-    };
+    return () => stopCamera();
   }, []);
 
   const analyzeImage = async () => {
-    if (!selectedFile) {
-      alert("Upload or capture an image first");
-      return;
-    }
+    if (!selectedFile) return;
 
-    const storedId = localStorage.getItem("user_id");
-
-    if (!storedId) {
-      alert("Please login first");
-      return;
-    }
-
-    // FastAPI expects integer user_id
-    const user_id = Number(storedId);
+    const user_id = Number(localStorage.getItem("user_id"));
 
     const formData = new FormData();
-
-    // MUST match backend parameters in main.py
     formData.append("file", selectedFile);
     formData.append("user_id", user_id.toString());
 
     try {
       setLoading(true);
-
-      const response = await fetch(`${API}/predict`, {
+      const res = await fetch(`${API}/predict`, {
         method: "POST",
         body: formData,
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        console.error("Backend error:", data);
-        alert("Prediction failed");
-        setLoading(false);
-        return;
-      }
-
-      // Handle backend error responses safely
-      if (data.error) {
-        console.error("Backend error:", data.error);
-        alert(data.error);
-        setLoading(false);
-        return;
-      }
-
+      const data = await res.json();
       setResult(data);
       setLoading(false);
-    } catch (err) {
-      console.error(err);
+    } catch {
       alert("Server error");
       setLoading(false);
     }
   };
 
+  const downloadReport = async () => {
+    if (!result) return;
+
+    const res = await fetch(`${API}/report`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(result),
+    });
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "report.pdf";
+    a.click();
+  };
+
   return (
-    <section id="detector" className="py-20 bg-black">
-      <div className="max-w-6xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-10">
-        {/* LEFT SIDE */}
+    <section className="py-20 bg-black">
+      <div className="max-w-6xl mx-auto grid md:grid-cols-2 gap-10">
+
+        {/* LEFT */}
         <div className="border border-gray-800 p-6 rounded-lg">
           {preview ? (
-            <div>
+            <div className="space-y-4">
               <img src={preview} className="w-full rounded" />
+
               <button
                 onClick={() => {
                   setPreview(null);
                   setSelectedFile(null);
+                  setResult(null);
                 }}
-                className="text-gray-400 mt-3"
+                className="w-full bg-red-500 text-white py-2 rounded font-semibold hover:scale-105 transition"
               >
                 Remove Image
               </button>
             </div>
           ) : (
-            <div className="border border-dashed border-gray-700 p-16 text-center space-y-4">
-              <div>
-                <p className="text-gray-400 mb-2">Upload acne image</p>
+            <div className="space-y-4">
+              <label className="w-full block border border-green-500 text-green-400 py-2 rounded-lg text-center cursor-pointer font-semibold hover:bg-green-500 hover:text-black transition duration-200">
+                Choose Image
                 <input
                   type="file"
-                  accept="image/*"
                   onChange={handleUpload}
-                  className="text-gray-300"
+                  className="hidden"
                 />
+              </label>
+
+              <div className="flex items-center justify-center gap-2 text-gray-500 text-sm">
+                <div className="flex-1 h-px bg-gray-700"></div>
+                OR
+                <div className="flex-1 h-px bg-gray-700"></div>
               </div>
 
-              <div className="flex flex-col items-center gap-3">
-                <p className="text-gray-500 text-sm">or</p>
-                <button
-                  type="button"
-                  onClick={openCamera}
-                  className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-black font-semibold rounded"
-                >
-                  Capture Live Photo
-                </button>
-              </div>
+              <button
+                onClick={openCamera}
+                className="w-full border border-green-500 text-green-400 py-2 rounded-lg font-semibold hover:bg-green-500 hover:text-black transition duration-200"
+              >
+                Open Camera
+              </button>
             </div>
           )}
 
           {isCameraOpen && (
-            <div className="mt-6 space-y-3">
-              <div className="aspect-video bg-black border border-gray-700 rounded overflow-hidden flex items-center justify-center relative">
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  onCanPlay={() => setIsCameraReady(true)}
-                  className="w-full h-full object-cover"
-                />
-                {!isCameraReady && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-                    <span className="text-gray-300 text-sm">
-                      Starting camera...
-                    </span>
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center justify-between gap-3">
+            <div className="mt-4 space-y-3">
+              <video ref={videoRef} className="w-full rounded" />
+
+              <div className="flex gap-2">
                 <button
-                  type="button"
                   onClick={capturePhoto}
-                  className="flex-1 bg-green-500 hover:bg-green-600 text-black font-semibold py-2 rounded"
+                  className="flex-1 bg-green-500 text-black py-2 rounded"
                 >
                   Capture
                 </button>
+
                 <button
-                  type="button"
                   onClick={stopCamera}
-                  className="flex-1 bg-gray-700 hover:bg-gray-600 text-gray-100 font-semibold py-2 rounded"
+                  className="flex-1 bg-gray-700 text-white py-2 rounded"
                 >
-                  Close Camera
+                  Close
                 </button>
               </div>
-              {/* Hidden canvas used for capturing a frame from the video */}
+
               <canvas ref={canvasRef} className="hidden" />
             </div>
           )}
@@ -231,40 +193,74 @@ export default function AcneDetector() {
           <button
             onClick={analyzeImage}
             disabled={loading}
-            className="mt-6 w-full bg-green-500 hover:bg-green-600 disabled:opacity-60 disabled:cursor-not-allowed text-black font-semibold py-3 rounded"
+            className="mt-6 w-full bg-green-500 text-black py-2 rounded"
           >
             {loading ? "Analyzing..." : "Analyze Image"}
           </button>
         </div>
 
-        {/* RIGHT PANEL */}
-        <div className="border border-gray-800 p-10 rounded-lg flex items-center justify-center">
+        {/* RIGHT */}
+        <div className="border border-gray-800 p-6 rounded-lg text-center">
           {result ? (
-            <div className="text-center">
-              {result.heatmap ? (
-                <div className="mb-6">
-                  <p className="text-gray-300 mb-3">Acne Heatmap (Grad-CAM)</p>
-                  <img
-                    src={result.heatmap}
-                    className="w-full rounded"
-                    alt="Grad-CAM heatmap overlay"
-                  />
-                </div>
-              ) : null}
+            <>
+              {result.heatmap && (
+                <img src={result.heatmap} className="mb-4 rounded" />
+              )}
 
-              <h2 className="text-3xl text-green-400 font-bold mb-3">
+              <h2 className="text-2xl text-green-400 font-bold">
                 {predictionLabel}
               </h2>
 
-              <p className="text-gray-300">
-                Confidence:{" "}
-                {result?.confidence ? result.confidence.toFixed(2) : "0"}%
+              <p className="text-gray-300 mt-2">
+                Confidence: {result.confidence?.toFixed(2)}%
               </p>
-            </div>
+
+              {result.severity && (
+                <div className="mt-4">
+                  <div className="w-full bg-gray-700 h-3 rounded">
+                    <div
+                      className={`h-3 rounded ${
+                        result.severity === "Mild Acne"
+                          ? "bg-green-400"
+                          : result.severity === "Moderate Acne"
+                          ? "bg-yellow-400"
+                          : "bg-red-500"
+                      }`}
+                      style={{ width: `${result.severity_score}%` }}
+                    />
+                  </div>
+                  <p className="text-white mt-1">{result.severity}</p>
+                </div>
+              )}
+
+              {result.recommendation && (
+                <p className="mt-4 text-gray-300">
+                  <span className="text-green-400 font-semibold">
+                    Recommendation:
+                  </span>{" "}
+                  {result.recommendation}
+                </p>
+              )}
+
+              {/* BRIGHT DISCLAIMER */}
+              {result.disclaimer && (
+                <p className="mt-4 text-sm text-yellow-400 font-medium">
+                  ⚠ {result.disclaimer}
+                </p>
+              )}
+
+              <button
+                onClick={downloadReport}
+                className="mt-6 bg-blue-500 text-black px-4 py-2 rounded"
+              >
+                Download Report
+              </button>
+            </>
           ) : (
             <p className="text-gray-500">Awaiting Input</p>
           )}
         </div>
+
       </div>
     </section>
   );
