@@ -72,3 +72,18 @@ Thumbs.db
 # -------------------------
 .env
 .env.*
+
+# -------------------------
+# Database Files
+# -------------------------
+*.db
+dermai.db
+*.sqlite
+*.sqlite3
+
+# -------------------------
+# Generated PDF Reports
+# -------------------------
+*.pdf
+report.pdf
+*.tmp

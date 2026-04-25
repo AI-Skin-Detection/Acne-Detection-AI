@@ -1,6 +1,7 @@
 import os
 import io
 import base64
+import tempfile
 import bcrypt
 import sqlite3
 from collections import Counter
@@ -17,8 +18,13 @@ from ultralytics import YOLO
 from torchvision import models, transforms
 from torchvision.transforms.functional import to_pil_image
 from fastapi.responses import FileResponse, StreamingResponse
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer,
+    Image as PDFImage, Table, TableStyle
+)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
 
 app = FastAPI()
 
@@ -453,39 +459,340 @@ def get_history(user_id: int):
         for r in records
     ]
 
-
 # ---------------- PDF GENERATION ----------------
 
 class PdfReportRequest(BaseModel):
     prediction: str
     confidence: float
-    original_image: str | None = None
+    original_image: str | None = None   # base64 original image from frontend
+    yolo_image: str | None = None       # base64 detection result image from frontend
+
 
 @app.post("/generate-pdf")
 def generate_pdf(payload: PdfReportRequest):
-    print("PDF API CALLED ✅")
 
+    import io
+    import os
+    import base64
+    import tempfile
+    from datetime import datetime
+    from PIL import Image as PILImage
+
+    from fastapi.responses import StreamingResponse
+
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+        Image as PDFImage,
+        PageBreak
+    )
+
+    from reportlab.lib.styles import (
+        getSampleStyleSheet,
+        ParagraphStyle
+    )
+
+    from reportlab.lib import colors
+    from reportlab.lib.units import inch
+
+    # PDF BUFFER
     pdf_buffer = io.BytesIO()
-    doc = SimpleDocTemplate(pdf_buffer)
+
+    doc = SimpleDocTemplate(
+        pdf_buffer,
+        rightMargin=40,
+        leftMargin=40,
+        topMargin=50,
+        bottomMargin=40,
+        title="Acne Detection Report"
+    )
+
     styles = getSampleStyleSheet()
+
+    # -------- CUSTOM STYLES --------
+
+    title_style = ParagraphStyle(
+        name="TitleCustom",
+        parent=styles["Title"],
+        fontSize=28,
+        alignment=1,
+        textColor=colors.HexColor("#0D47A1"),
+        spaceAfter=6,
+        fontName="Helvetica-Bold"
+    )
+
+    subtitle_style = ParagraphStyle(
+        name="SubtitleCustom",
+        parent=styles["Normal"],
+        fontSize=11,
+        alignment=1,
+        textColor=colors.HexColor("#666666"),
+        spaceAfter=24
+    )
+
+    section_style = ParagraphStyle(
+        name="Section",
+        parent=styles["Heading2"],
+        fontSize=13,
+        textColor=colors.HexColor("#1565C0"),
+        spaceAfter=12,
+        fontName="Helvetica-Bold",
+        borderColor=colors.HexColor("#E0E0E0"),
+        borderWidth=2,
+        borderPadding=8
+    )
+
+    normal_style = ParagraphStyle(
+        name="NormalCustom",
+        parent=styles["Normal"],
+        fontSize=10,
+        leading=14,
+        alignment=4
+    )
+
+    label_style = ParagraphStyle(
+        name="Label",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#1565C0"),
+        fontName="Helvetica-Bold"
+    )
+
+    value_style = ParagraphStyle(
+        name="Value",
+        parent=styles["Normal"],
+        fontSize=10,
+        textColor=colors.HexColor("#333333")
+    )
+
+    footer_style = ParagraphStyle(
+        name="Footer",
+        parent=styles["Normal"],
+        fontSize=8,
+        alignment=1,
+        textColor=colors.HexColor("#999999"),
+        spaceAfter=6
+    )
+
+    # -------- CONTENT --------
 
     content = []
 
-    content.append(Paragraph("Acne Detection Report", styles["Title"]))
+    # Header
+    content.append(
+        Paragraph("🔬 DERMAI - AI ACNE DETECTION REPORT", title_style)
+    )
+
+    content.append(
+        Paragraph(
+            f"Generated on {datetime.now().strftime('%B %d, %Y at %I:%M %p')}",
+            subtitle_style
+        )
+    )
+
+    content.append(Spacer(1, 12))
+
+    # Image Section - Original and Detection Images
+    temp_file_path_original = None
+    temp_file_path_yolo = None
+
+    if payload.original_image or payload.yolo_image:
+        content.append(
+            Paragraph("📸 IMAGE ANALYSIS", section_style)
+        )
+        content.append(Spacer(1, 12))
+
+    # Helper function to process base64 image
+    def process_base64_image(img_data_str):
+        try:
+            if not img_data_str:
+                return None
+                
+            img_data = img_data_str
+
+            # Handle base64 data URL format
+            if "," in img_data:
+                img_data = img_data.split(",")[1]
+
+            # Decode base64
+            image_bytes = base64.b64decode(img_data)
+
+            # Validate image by opening it with PIL
+            pil_image = PILImage.open(io.BytesIO(image_bytes))
+            
+            # Create temp file with proper format
+            temp_file = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".png",
+                mode='wb'
+            )
+            
+            # Convert to PNG if needed
+            if pil_image.format != "PNG":
+                rgb_image = pil_image.convert("RGB")
+                rgb_image.save(temp_file, format="PNG")
+            else:
+                temp_file.write(image_bytes)
+
+            temp_file.close()
+            return temp_file.name
+        except Exception as e:
+            print(f"Image processing failed: {e}")
+            return None
+
+    # Process original image
+    if payload.original_image:
+        temp_file_path_original = process_base64_image(payload.original_image)
+        if temp_file_path_original:
+            try:
+                content.append(
+                    Paragraph("<b>Original Uploaded Image</b>", label_style)
+                )
+                pdf_image = PDFImage(
+                    temp_file_path_original,
+                    width=3.0 * inch,
+                    height=3.0 * inch
+                )
+                content.append(pdf_image)
+            except Exception as img_err:
+                print(f"Error adding original image to PDF: {img_err}")
+                content.append(
+                    Paragraph(
+                        "<font color='#999999'><i>Original image could not be displayed</i></font>",
+                        normal_style
+                    )
+                )
+
+    # Add spacing between images if both exist
+    if payload.original_image and payload.yolo_image:
+        content.append(Spacer(1, 16))
+
+    # Process YOLO detection image
+    if payload.yolo_image:
+        temp_file_path_yolo = process_base64_image(payload.yolo_image)
+        if temp_file_path_yolo:
+            try:
+                content.append(
+                    Paragraph("<b>Detection Result (YOLO Annotations)</b>", label_style)
+                )
+                pdf_image = PDFImage(
+                    temp_file_path_yolo,
+                    width=3.0 * inch,
+                    height=3.0 * inch
+                )
+                content.append(pdf_image)
+            except Exception as img_err:
+                print(f"Error adding detection image to PDF: {img_err}")
+                content.append(
+                    Paragraph(
+                        "<font color='#999999'><i>Detection image could not be displayed</i></font>",
+                        normal_style
+                    )
+                )
+
+    if payload.original_image or payload.yolo_image:
+        content.append(Spacer(1, 20))
+
+    # Analysis Results Section
+    content.append(
+        Paragraph("📋 DETECTION RESULTS", section_style)
+    )
+
+    content.append(Spacer(1, 10))
+
+    # Create results table with better styling
+    result_data = [
+        [
+            Paragraph("<b>Detected Acne Type</b>", label_style),
+            Paragraph(str(payload.prediction), value_style)
+        ],
+        [
+            Paragraph("<b>Confidence Score</b>", label_style),
+            Paragraph(f"{payload.confidence:.2f}%", value_style)
+        ],
+        [
+            Paragraph("<b>Analysis Time</b>", label_style),
+            Paragraph(
+                datetime.now().strftime("%d-%m-%Y | %I:%M %p"),
+                value_style
+            )
+        ]
+    ]
+
+    table = Table(
+        result_data,
+        colWidths=[2.0 * inch, 3.0 * inch]
+    )
+
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F5F5F5")),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.black),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 12),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("GRID", (0, 0), (-1, -1), 1, colors.HexColor("#E0E0E0")),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#FAFAFA"), colors.HexColor("#F5F5F5")]),
+    ]))
+
+    content.append(table)
     content.append(Spacer(1, 20))
 
-    content.append(Paragraph("Name: User", styles["Normal"]))
-    content.append(Paragraph(f"Detected Acne Type: {payload.prediction}", styles["Normal"]))
-    content.append(Paragraph(f"Confidence: {payload.confidence:.2f}%", styles["Normal"]))
+    # Information Section
+    content.append(
+        Paragraph("ℹ️ ABOUT THIS REPORT", section_style)
+    )
+
+    content.append(Spacer(1, 8))
+
+    info_text = """
+    <font size="9" color="#666666">
+    This report is generated by DermaAI, an artificial intelligence-powered acne detection system. 
+    The analysis is based on machine learning models trained to identify different types of acne lesions. 
+    <br/><br/>
+    <b>Disclaimer:</b> This report is for informational purposes only and should not be used as a substitute 
+    for professional medical advice. Please consult a dermatologist for accurate diagnosis and treatment recommendations.
+    </font>
+    """
+
+    content.append(Paragraph(info_text, footer_style))
 
     content.append(Spacer(1, 20))
-    content.append(Paragraph("Generated by AI System", styles["Italic"]))
 
-    doc.build(content)
+    # Footer
+    footer_text = "DermaAI Smart Detection Engine | Powered by Advanced Machine Learning"
+    content.append(
+        Paragraph(footer_text, footer_style)
+    )
+
+    # -------- BUILD PDF --------
+    try:
+        doc.build(content)
+    except Exception as e:
+        print(f"PDF build error: {e}")
+        raise
+
     pdf_buffer.seek(0)
+
+    # Clean up temp files
+    for temp_path in [temp_file_path_original, temp_file_path_yolo]:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                print(f"Failed to clean up temp file: {e}")
 
     return StreamingResponse(
         pdf_buffer,
         media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=report.pdf"},
+        headers={
+            "Content-Disposition": "attachment; filename=Acne_Detection_Report.pdf"
+        },
     )
