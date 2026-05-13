@@ -20,14 +20,11 @@ from torchvision.transforms.functional import to_pil_image
 from fastapi.responses import FileResponse, StreamingResponse
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer,
-    Image as PDFImage, Table, TableStyle
+    Image as RLImage, Table, TableStyle, HRFlowable
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, HRFlowable
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
 from reportlab.graphics.shapes import Drawing, Rect, String
 
 app = FastAPI()
@@ -79,11 +76,12 @@ init_db()
 # ---------------- LOAD MODEL ----------------
 
 CLASS_NAMES = ['Blackheads', 'Cyst', 'Papules', 'Pustules', 'Whiteheads']
-YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.25"))
-YOLO_MAX_DETECTIONS = int(os.getenv("YOLO_MAX_DETECTIONS", "30"))
+YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
+YOLO_MAX_DETECTIONS = int(os.getenv("YOLO_MAX_DETECTIONS", "50"))
+YOLO_MIN_CONFIDENCE = float(os.getenv("YOLO_MIN_CONFIDENCE", "0.15"))  # 15% minimum confidence filter
 YOLO_CONFIDENCE_FALLBACKS = [
     float(value.strip())
-    for value in os.getenv("YOLO_CONFIDENCE_FALLBACKS", "0.25,0.10,0.05,0.01").split(",")
+    for value in os.getenv("YOLO_CONFIDENCE_FALLBACKS", "0.35,0.25,0.15,0.10").split(",")
     if value.strip()
 ]
 
@@ -93,9 +91,6 @@ model.fc = nn.Linear(model.fc.in_features, 5)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
 YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", os.path.join(BASE_DIR, "last.pt"))
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(os.path.dirname(BASE_DIR), "acne_model_best.pth")
-YOLO_MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
 model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
 model.eval()
@@ -120,7 +115,7 @@ resnet_transform = transforms.Compose([
 ])
 
 
-def _classify_image(image: Image.Image) -> tuple[str, float]:
+def _classify_image(image: PILImage.Image) -> tuple[str, float]:
     img_tensor = resnet_transform(image).unsqueeze(0)
 
     with torch.no_grad():
@@ -132,11 +127,10 @@ def _classify_image(image: Image.Image) -> tuple[str, float]:
 
 
 def _yolo_detections(
-    image: Image.Image,
+    image: PILImage.Image,
     image_prediction: str | None = None,
     image_confidence: float | None = None,
 ) -> tuple[list[dict[str, object]], float | None]:
-def _yolo_detections(image: PILImage.Image) -> list[dict[str, object]]:
     detections: list[dict[str, object]] = []
 
     if yolo_model is None:
@@ -171,7 +165,6 @@ def _yolo_detections(image: PILImage.Image) -> list[dict[str, object]]:
             current_result = results[0]
             raw_count = len(current_result.boxes)
             print(f"Raw YOLO detections at conf={threshold}: {raw_count}")
-        results = yolo_model.predict(source=image, verbose=False, conf=0.65, iou=0.4, imgsz=640)
 
             # Prefer the threshold that returns the highest number of boxes.
             if raw_count > best_count:
@@ -208,19 +201,23 @@ def _yolo_detections(image: PILImage.Image) -> list[dict[str, object]]:
                 min(img_height, int(round(y2))),
             )
 
+            # Validate box coordinates
             if crop_box[2] <= crop_box[0] or crop_box[3] <= crop_box[1]:
                 print(f"  Filtered: invalid box {crop_box}")
-            if area_ratio > 0.7:
-                print(f"  Filtered: box too large")
                 continue
 
-            # NEW: filter very small noise detections
-            if area_ratio < 0.001:
+            # Filter extremely large boxes (likely false positives)
+            if area_ratio > 0.85:
+                print(f"  Filtered: box area ratio {area_ratio:.1%} too large (>85%)")
+                continue
+
+            # Filter very small noise detections (less than 0.01% of image)
+            if area_ratio < 0.0001:
                 print(f"  Filtered: box too small (noise)")
                 continue
 
-            # NEW: filter low confidence noise
-            if confidence < 40:
+            # Filter low confidence noise (relaxed to 15%)
+            if confidence < (YOLO_MIN_CONFIDENCE * 100):
                 print(f"  Filtered: low confidence ({confidence:.1f}%)")
                 continue
 
@@ -566,10 +563,8 @@ class PdfReportRequest(BaseModel):
     confidence: float
     original_image: str | None = None   # base64 original image from frontend
     yolo_image: str | None = None       # base64 detection result image from frontend
-
     severity: str | None = None
     severity_score: int | None = None
-    original_image: str | None = None
 
 @app.post("/generate-pdf")
 def generate_pdf(payload: PdfReportRequest):
@@ -754,7 +749,7 @@ def generate_pdf(payload: PdfReportRequest):
                 content.append(
                     Paragraph("<b>Original Uploaded Image</b>", label_style)
                 )
-                pdf_image = PDFImage(
+                pdf_image = RLImage(
                     temp_file_path_original,
                     width=3.0 * inch,
                     height=3.0 * inch
@@ -781,7 +776,7 @@ def generate_pdf(payload: PdfReportRequest):
                 content.append(
                     Paragraph("<b>Detection Result (YOLO Annotations)</b>", label_style)
                 )
-                pdf_image = PDFImage(
+                pdf_image = RLImage(
                     temp_file_path_yolo,
                     width=3.0 * inch,
                     height=3.0 * inch
