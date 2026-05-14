@@ -49,7 +49,7 @@ Upload. Analyze. Understand.
 </div>
 
 <div className="text-center">
-<p className="text-green-400 text-3xl font-bold">95%</p>
+<p className="text-green-400 text-3xl font-bold">84%</p>
 <p className="text-gray-400 text-sm">Accuracy</p>
 </div>
 

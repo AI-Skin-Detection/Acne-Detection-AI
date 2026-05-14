@@ -30,7 +30,8 @@ const Navbar: React.FC = () => {
 
   const logout = () => {
     localStorage.removeItem("user_id");
-    window.location.reload();
+    setLoggedIn(false);
+    window.location.href = "/";
   };
 
   return (
@@ -80,7 +81,7 @@ const Navbar: React.FC = () => {
             About
           </button>
 
-          {loggedIn && (
+          {loggedIn ? (
             <>
               <span className="text-green-400 text-sm">
                 Logged In
@@ -100,6 +101,13 @@ const Navbar: React.FC = () => {
                 Logout
               </button>
             </>
+          ) : (
+            <button
+              onClick={() => window.location.href = "/login"}
+              className="text-gray-300 hover:text-green-400"
+            >
+              Login
+            </button>
           )}
 
           <button
@@ -151,7 +159,7 @@ const Navbar: React.FC = () => {
               About
             </button>
 
-            {loggedIn && (
+            {loggedIn ? (
               <>
                 <button
                   onClick={() => window.location.href = "/history"}
@@ -167,6 +175,13 @@ const Navbar: React.FC = () => {
                   Logout
                 </button>
               </>
+            ) : (
+              <button
+                onClick={() => window.location.href = "/login"}
+                className="block w-full text-left text-gray-300"
+              >
+                Login
+              </button>
             )}
 
           </div>
