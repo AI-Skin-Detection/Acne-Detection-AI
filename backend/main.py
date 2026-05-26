@@ -88,7 +88,7 @@ YOLO_CONFIDENCE_FALLBACKS = [
 model = models.resnet50(weights=None)
 model.fc = nn.Linear(model.fc.in_features, 5)
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "acne_model_best.pth")
 YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", os.path.join(BASE_DIR, "last.pt"))
 
