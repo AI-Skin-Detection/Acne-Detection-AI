@@ -87,3 +87,4 @@ dermai.db
 *.pdf
 report.pdf
 *.tmp
+backend/dermai.db
